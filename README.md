@@ -1,3 +1,7 @@
+## Notes
+
+* FEMNIST dataset is in "/work/ntubiggg1/dataset"
+
 ## Federated Learning with Matched Averaging
 This is the code accompanying the ICLR 2020 paper "Federated Learning with Matched Averaging " Paper link: [https://openreview.net/forum?id=BkluqlSFDS]
 
