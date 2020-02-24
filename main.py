@@ -5,6 +5,7 @@ import sys
 import glob
 import os
 import shutil
+import random
 from sklearn.preprocessing import normalize
 import torch.multiprocessing as mp ##@ 
 from torch.multiprocessing import Process, Lock, Manager
@@ -32,7 +33,7 @@ from matching_performance import compute_model_averaging_accuracy, compute_pdm_c
 args_logdir = "logs/cifar10"
 #args_dataset = "cifar10"
 args_datadir = "./data/cifar10"
-args_dataroot = "../../leaf/data"
+args_dataroot = "./data"
 # args_init_seed = 0
 args_net_config = [3072, 100, 10]
 #args_partition = "hetero-dir"
@@ -168,7 +169,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args, 
     logger.info(' ** Training complete **')
     return train_acc, test_acc
 
-def get_local_train_net(args, worker_index, dataidxs, net, device):
+def get_local_train_net(args, worker_index, dataidxs, net, device, args_datadir):
     logger.info("Training network %s. n_training: %d" % (str(worker_index), len(dataidxs)))
     # move the model to cuda device:
     net.to(device)
@@ -176,6 +177,7 @@ def get_local_train_net(args, worker_index, dataidxs, net, device):
     train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
     train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
     trainacc, testacc = train_net(worker_index, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
+    net.cpu()
     save_model(net, worker_index, log_dir=args.save)
 
 def local_train(nets, args, net_dataidx_map, device="cpu"):
@@ -187,19 +189,23 @@ def local_train(nets, args, net_dataidx_map, device="cpu"):
 
         for net_id, net in nets.items():
             if not args.retrain:
-                device = 'cuda:%d'%(net_id%4) # TODO: adaptive gpu_num
-                p = mp.Process(target=get_local_train_net, args=(args, net_id, net_dataidx_map[net_id], net, device))
+                device_idx = 'cuda:%d'%(net_id%2) # TODO: adaptive gpu_num
+                p = mp.Process(target=get_local_train_net, args=(args, net_id, net_dataidx_map[net_id], net, device_idx, args_datadir))
                 # We first train the model across `num_processes` processes
                 p.start()
                 processes.append(p)
 
             else:
-                load_model(net, net_id, device=device, log_dir="../../FedMA-FedAvg/tmp/checkpoints/search-try-20200220-002252/") ##@ no need to redo local_train
+                load_model(net, net_id, device=device, log_dir="tmp/checkpoints/search-try-20200224-153331/") ##@ no need to redo local_train
                 # load_model(net, net_id, device=device, log_dir=args.save)
             
-            if len(processes)>=8: # restrict maximum processes
+            if len(processes)>=16: # restrict maximum processes
                 for p in processes:
                     p.join()
+                processes = []
+        
+        for p in processes:
+            p.join()
 
     else:
         for net_id, net in nets.items():
@@ -219,7 +225,7 @@ def local_train(nets, args, net_dataidx_map, device="cpu"):
                 # saving the trained models here
                 save_model(net, net_id, log_dir=args.save)
             else:
-                load_model(net, net_id, device=device, log_dir="../../FedMA-FedAvg/tmp/checkpoints/search-try-20200220-002252/") ##@ no need to redo local_train
+                load_model(net, net_id, device=device, log_dir="tmp/checkpoints/search-femnist-20200224-144352/") ##@ no need to redo local_train
                 # load_model(net, net_id, device=device, log_dir=args.save)
 
     nets_list = list(nets.values())
@@ -1384,7 +1390,7 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
             for lid in range(2 * (layer_index + 1) - 1, len(batch_weights[0])):
                 tempt_weights[worker_index].append(batch_weights[worker_index][lid])
 
-        device_list = ['cuda:%d'%(i%3) for i in range(num_workers)] # TODO: adaptive gpu_num
+        device_list = ['cuda:%d'%(i%2) for i in range(num_workers)] # TODO: adaptive gpu_num
         mp.set_start_method('spawn', force=True)
         m = Manager()
         d = m.dict()
@@ -1397,6 +1403,10 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
             # We first train the model across `num_processes` processes
             p.start()
             processes.append(p)
+            if len(processes)>=16: # restrict maximum processes
+                for p in processes:
+                    p.join()
+                processes = []
         for p in processes:
             p.join()
         retrained_nets = [d[rank] for rank in range(num_workers)]

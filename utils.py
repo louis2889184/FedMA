@@ -1238,6 +1238,7 @@ def compute_ensemble_accuracy(models: list, dataloader, n_classes, train_cls_cou
 
     weights_norm = normalize_weights(weights_list)
 
+    model = model.to(device)
     with torch.no_grad():
         for batch_idx, (x, target) in enumerate(dataloader):
             x, target = x.to(device), target.to(device)
