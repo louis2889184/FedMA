@@ -90,7 +90,7 @@ def add_fit_args(parser):
     parser.add_argument('--oneshot_matching', type=bool, default=False, metavar='OM',
                         help='if the code is going to conduct one shot matching')
     parser.add_argument('--retrain', type=bool, default=False, 
-                            help='whether to retrain the model or load model locally')
+                            help='whether to retrain the model or load model locally') # TODO: Confusing: retrain=True means *NO* retrain
     parser.add_argument('--rematching', type=bool, default=False, 
                             help='whether to recalculating the matching process (this is for speeding up the debugging process)')
     parser.add_argument('--comm_type', type=str, default='layerwise', 
@@ -102,6 +102,7 @@ def add_fit_args(parser):
     parser.add_argument('--clients_per_round', type=int, default=-1, 
                         help='number of clients trained per round')
     parser.add_argument('--multiprocess', type=bool, default=False, help='whether to use multiprocessing')
+    parser.add_argument('--gpu', type=str, default='0', help='gpu index')
     args = parser.parse_args()
     return args
 
@@ -190,7 +191,7 @@ def local_train(nets, args, net_dataidx_map, device="cpu"):
 
         for net_id, net in nets.items():
             if not args.retrain:
-                device_idx = 'cuda:%d'%(net_id%2) # TODO: adaptive gpu_num
+                device_idx = 'cuda:%d'%(net_id%args.gpu_num)
                 p = mp.Process(target=get_local_train_net, args=(args, net_id, net_dataidx_map[net_id], net, device_idx, args_datadir))
                 # We first train the model across `num_processes` processes
                 p.start()
@@ -1391,7 +1392,7 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
             for lid in range(2 * (layer_index + 1) - 1, len(batch_weights[0])):
                 tempt_weights[worker_index].append(batch_weights[worker_index][lid])
 
-        device_list = ['cuda:%d'%(i%2) for i in range(num_workers)] # TODO: adaptive gpu_num
+        device_list = ['cuda:%d'%(i%args.gpu_num) for i in range(num_workers)]
         mp.set_start_method('spawn', force=True)
         m = Manager()
         d = m.dict()
@@ -1462,6 +1463,14 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
     return matched_weights, assignments_list
 
 
+def get_retrained_fedavg_net(args, worker_index, dataidxs, tmp_weight, device, d, lock):
+    train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+    retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), tmp_weight, args, device=device)
+    with lock:
+        d[worker_index]=retrained_cnn.cpu()
+
+
+
 def fedavg_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                             averaging_weights, args,
                             train_dl_global,
@@ -1473,16 +1482,43 @@ def fedavg_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
     logging.info("Weights shapes: {}".format([bw.shape for bw in batch_weights[0]]))
 
     for cr in range(comm_round):
-        retrained_nets = []
+        
         logger.info("Communication round : {}".format(cr))
-        for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
-            dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+
+        if args.multiprocess:
+            workers = random.sample(range(args.n_nets), args.clients_per_round)
+            num_workers = args.clients_per_round
+
+            device_list = ['cuda:%d'%(i%args.gpu_num) for i in range(num_workers)]
+            mp.set_start_method('spawn', force=True)
+            m = Manager()
+            d = m.dict()
+            lock = Lock()
+
+            processes = []
+            for rank in range(num_workers):
+                p = mp.Process(target=get_retrained_fedavg_net, args=(args, rank, net_dataidx_map[rank], batch_weights[rank], device_list[rank], d, lock))
+                p.start()
+                processes.append(p)
+                if len(processes)>=16: # restrict maximum processes
+                    for p in processes:
+                        p.join()
+                    processes = []
+            for p in processes:
+                p.join()
+            retrained_nets = [d[rank] for rank in d]
             
-            # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
-            retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), batch_weights[worker_index], args, device=device)
-            
-            retrained_nets.append(retrained_cnn)
+        else:
+            retrained_nets = []
+            for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
+                dataidxs = net_dataidx_map[worker_index]
+                train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+                
+                # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
+                retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), batch_weights[worker_index], args, device=device)
+                
+                retrained_nets.append(retrained_cnn)
+
         batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
 
         total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
@@ -1618,6 +1654,10 @@ if __name__ == "__main__":
     args = add_fit_args(argparse.ArgumentParser(description='Probabilistic Federated CNN Matching'))
     args.save = '{}search-{}-{}'.format(args.save, args.note, time.strftime("%Y%m%d-%H%M%S"))
     create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    gpu_num = len(args.gpu.split(","))
+    setattr(args, "gpu_num", gpu_num)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
