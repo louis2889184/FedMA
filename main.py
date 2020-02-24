@@ -30,7 +30,7 @@ logging.getLogger().addHandler(fh)
 args_logdir = "logs/cifar10"
 #args_dataset = "cifar10"
 args_datadir = "./data/cifar10"
-args_dataroot = "./data"
+args_dataroot = "/work/ntubiggg1/dataset"
 # args_init_seed = 0
 args_net_config = [3072, 100, 10]
 #args_partition = "hetero-dir"
@@ -1534,7 +1534,7 @@ def fedma_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
 
 def create_exp_dir(path, scripts_to_save=None):
     if not os.path.exists(path):
-        os.mkdir(path)
+        os.makedirs(path)
     print('Experiment dir : {}'.format(path))
 
     if scripts_to_save is not None:
