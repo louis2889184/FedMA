@@ -289,7 +289,7 @@ class LeNetContainer(nn.Module):
 
 ### Moderate size of CNN for CIFAR-10 dataset
 class ModerateCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, output_dim=10):
         super(ModerateCNN, self).__init__()
         self.conv_layer = nn.Sequential(
             # Conv Layer block 1
@@ -324,7 +324,7 @@ class ModerateCNN(nn.Module):
             nn.Linear(512, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(p=0.1),
-            nn.Linear(512, 10)
+            nn.Linear(512, output_dim)
         )
 
     def forward(self, x):
@@ -335,7 +335,7 @@ class ModerateCNN(nn.Module):
 
 
 class ModerateCNNMNIST(nn.Module):
-    def __init__(self):
+    def __init__(self, output_dim=10):
         super(ModerateCNNMNIST, self).__init__()
         self.conv_layer = nn.Sequential(
             # Conv Layer block 1
@@ -368,7 +368,7 @@ class ModerateCNNMNIST(nn.Module):
             nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(p=0.1),
-            nn.Linear(512, 10)
+            nn.Linear(512, output_dim)
         )
 
     def forward(self, x):

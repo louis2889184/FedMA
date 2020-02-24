@@ -3,6 +3,9 @@ from PIL import Image
 import numpy as np
 from torchvision.datasets import MNIST, CIFAR10
 from torchvision.datasets import DatasetFolder
+import torch
+from collections import defaultdict
+import json
 
 from PIL import Image
 
@@ -40,6 +43,45 @@ def default_loader(path):
         return accimage_loader(path)
     else:
         return pil_loader(path)
+
+### Yi-Lin
+def read_dir(data_dir):
+    clients = []
+    groups = []
+    data = defaultdict(lambda : None)
+
+    files = os.listdir(data_dir)
+    files = [f for f in files if f.endswith('.json')]
+    for f in files:
+        file_path = os.path.join(data_dir,f)
+        with open(file_path, 'r') as inf:
+            cdata = json.load(inf)
+        clients.extend(cdata['users'])
+        if 'hierarchies' in cdata:
+            groups.extend(cdata['hierarchies'])
+        data.update(cdata['user_data'])
+
+    clients = list(sorted(data.keys()))
+    return clients, groups, data
+
+### Yi-Lin
+def read_data(train_data_dir):
+    '''parses data in given train and test data directories
+
+    assumes:
+    - the data in the input directories are .json files with 
+        keys 'users' and 'user_data'
+    - the set of train set users is the same as the set of test set users
+    
+    Return:
+        clients: list of client ids
+        groups: list of group ids; empty list if none found
+        train_data: dictionary of train data
+        test_data: dictionary of test data
+    '''
+    train_clients, train_groups, train_data = read_dir(train_data_dir)
+
+    return train_clients, train_groups, train_data
 
 class MNIST_truncated(data.Dataset):
 
@@ -95,6 +137,81 @@ class MNIST_truncated(data.Dataset):
 
     def __len__(self):
         return len(self.data)
+
+### Yi-Lin
+class FEMNIST_truncated(data.Dataset):
+
+    def __init__(self, root, dataidxs=None, train=True, transform=None, target_transform=None, download=False):
+
+        self.root = root
+        self.dataidxs = dataidxs
+        self.train = train
+        self.transform = transform
+        self.target_transform = target_transform
+        self.download = download
+
+        self.data, self.target = self.__build_truncated_dataset__()
+
+    def __build_truncated_dataset__(self):
+
+        data_dir = os.path.join(self.root, 'train' if self.train else 'test')
+        
+        users, groups, data = read_data(data_dir)
+
+        data_list, label_list = [], []
+        user_id_dict = {}
+
+        for i, user in enumerate(users):
+            user_id_dict[user] = i
+            _data = data[user]
+            data_list.append(np.vstack(_data['x']))
+            label_list.append(np.hstack(_data['y']))
+
+        data = np.vstack(data_list)
+        target = np.hstack(label_list)
+
+        if self.dataidxs is not None:
+            data = data[self.dataidxs]
+            target = target[self.dataidxs]
+
+        # if self.dataidxs is not None:
+        #     data = data_list[user_id_dict[self.dataidxs]]
+        #     target = label_list[user_id_dict[self.dataidxs]]
+
+        # else:
+        #     data = np.vstack(data_list)
+        #     target = np.hstack(label_list)
+
+        data = data.reshape(-1, 28, 28)
+            
+        data, target = torch.from_numpy(data), torch.from_numpy(target)
+        return data, target
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        img, target = self.data[index], self.target[index]
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(img.numpy(), mode='L')
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
+
+    def __len__(self):
+        return len(self.data)
+
 
 
 class CIFAR10_truncated(data.Dataset):

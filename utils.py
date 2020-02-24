@@ -23,7 +23,7 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import torch.nn as nn
 import torch.nn.init as init
-from datasets import MNIST_truncated, CIFAR10_truncated, ImageFolderTruncated, CIFAR10ColorGrayScaleTruncated
+from datasets import MNIST_truncated, CIFAR10_truncated, ImageFolderTruncated, CIFAR10ColorGrayScaleTruncated, FEMNIST_truncated
 from combine_nets import prepare_uniform_weights, prepare_sanity_weights, prepare_weight_matrix, normalize_weights, get_weighted_average_pred
 
 from vgg import *
@@ -919,11 +919,13 @@ def init_models(net_configs, n_nets, args):
         elif args.model == "simple-cnn":
             if args.dataset in ("cifar10", "cinic10"):
                 cnn = SimpleCNN(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=10)
-            elif args.dataset == "mnist":
+            # YI-LIN
+            elif args.dataset in ("mnist", "femnist"):
                 cnn = SimpleCNNMNIST(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=10)
         elif args.model == "moderate-cnn":
-            if args.dataset == "mnist":
-                cnn = ModerateCNNMNIST()
+            if args.dataset in ("mnist", "femnist"):
+                cnn = ModerateCNNMNIST(62 if args.dataset == "femnist" else 10)
+            # YI-LIN
             elif args.dataset in ("cifar10", "cinic10"):
                 cnn = ModerateCNN()
 
@@ -936,27 +938,35 @@ def init_models(net_configs, n_nets, args):
     return cnns, model_meta_data, layer_type
 
 
-def save_model(model, model_index):
+def save_model(model, model_index, log_dir=None):
     logger.info("saving local model-{}".format(model_index))
-    with open("trained_local_model"+str(model_index), "wb") as f_:
-        torch.save(model.state_dict(), f_)
+    if log_dir is not None:
+        with open(log_dir+"/trained_local_model"+str(model_index), "wb") as f_:
+            torch.save(model.state_dict(), f_)
+    else:
+        with open("trained_local_model"+str(model_index), "wb") as f_:
+            torch.save(model.state_dict(), f_)
     return
 
-def load_model(model, model_index, rank=0, device="cpu"):
+def load_model(model, model_index, rank=0, device="cpu", log_dir=None):
     #
-    with open("trained_local_model"+str(model_index), "rb") as f_:
-        model.load_state_dict(torch.load(f_))
+    if log_dir is not None:
+        with open(log_dir+"/trained_local_model"+str(model_index), "rb") as f_:
+            model.load_state_dict(torch.load(f_))
+    else:
+        with open("trained_local_model"+str(model_index), "rb") as f_:
+            model.load_state_dict(torch.load(f_))
     model.to(device)
     return model
 
 
-def save_model_dist_skew(model, model_index):
+def save_model_dist_skew(model, model_index, log_dir=None):
     logger.info("saving local model-{} dist skew".format(model_index))
     with open("trained_local_model_dist_skew"+str(model_index), "wb") as f_:
         torch.save(model.state_dict(), f_)
     return
 
-def load_model_dist_skew(model, model_index, device="cpu"):
+def load_model_dist_skew(model, model_index, device="cpu", log_dir=None):
     logger.info("loading local model-{} dist skew".format(model_index))
     with open("trained_local_model_dist_skew"+str(model_index), "rb") as f_:
         model.load_state_dict(torch.load(f_))
@@ -964,13 +974,13 @@ def load_model_dist_skew(model, model_index, device="cpu"):
     return model
 
 
-def save_model_viz(model, model_index):
+def save_model_viz(model, model_index, log_dir=None):
     logger.info("saving local model-{} visulization".format(model_index))
     with open("trained_local_model_viz{}_new".format(model_index), "wb") as f_:
         torch.save(model.state_dict(), f_)
     return
 
-def load_model_viz(model, model_index, device="cpu"):
+def load_model_viz(model, model_index, device="cpu", log_dir=None):
     logger.info("loading local model-{} visulization".format(model_index))
     with open("trained_local_model_viz"+str(model_index), "rb") as f_:
         model.load_state_dict(torch.load(f_))
@@ -980,7 +990,7 @@ def load_model_viz(model, model_index, device="cpu"):
 
 def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
 
-    if dataset in ('mnist', 'cifar10'):
+    if dataset in ('mnist', 'cifar10', 'femnist'):
         if dataset == 'mnist':
             dl_obj = MNIST_truncated
 
@@ -1011,12 +1021,23 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
             # data prep for test set
             transform_test = transforms.Compose([transforms.ToTensor(),normalize])
 
+        # Yi-Lin
+        elif dataset == 'femnist':
+            dl_obj = FEMNIST_truncated
+            transform_train = transforms.Compose([
+                           transforms.ToTensor(),
+                           transforms.Normalize((0.1307,), (0.3081,))])
+
+            transform_test = transforms.Compose([
+                           transforms.ToTensor(),
+                           transforms.Normalize((0.1307,), (0.3081,))])
+
 
         train_ds = dl_obj(datadir, dataidxs=dataidxs, train=True, transform=transform_train, download=True)
         test_ds = dl_obj(datadir, train=False, transform=transform_test, download=True)
 
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False)
+        train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
+        test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=0)
 
     elif dataset == 'cinic10':
         # statistic for normalizing the dataset
@@ -1102,8 +1123,8 @@ def get_dataloader_dist_skew(dataset, datadir, train_bs, test_bs, dataidxs=None,
                                                               transofrm_gray_scale=transform_test_gray_scale,
                                                               download=True)
 
-            train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True)
-            test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False)
+            train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=16)
+            test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=16)
 
     elif dataset == 'cinic10':
         pass

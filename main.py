@@ -1,7 +1,13 @@
 from utils import *
 import pickle
 import copy
+import sys
+import glob
+import os
+import shutil
 from sklearn.preprocessing import normalize
+
+from datasets import read_data
 
 from matching.pfnm import layer_wise_group_descent
 from matching.pfnm import block_patching, patch_weights
@@ -10,25 +16,33 @@ from matching.gaus_marginal_matching import match_local_atoms
 from combine_nets import compute_pdm_matching_multilayer, compute_iterative_pdm_matching
 from matching_performance import compute_model_averaging_accuracy, compute_pdm_cnn_accuracy, compute_pdm_vgg_accuracy, compute_full_cnn_accuracy
 
-logging.basicConfig()
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# logging.basicConfig()
+# logger = logging.getLogger()
+# logger.setLevel(logging.INFO)
+log_format = '%(asctime)s %(message)s'
+logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+    format=log_format, datefmt='%m/%d %I:%M:%S %p')
+fh = logging.FileHandler(os.path.join('log1.txt'))
+fh.setFormatter(logging.Formatter(log_format))
+logging.getLogger().addHandler(fh)
+
 
 args_logdir = "logs/cifar10"
 #args_dataset = "cifar10"
 args_datadir = "./data/cifar10"
-args_init_seed = 0
+args_dataroot = "./data"
+# args_init_seed = 0
 args_net_config = [3072, 100, 10]
 #args_partition = "hetero-dir"
-args_partition = "homo"
-args_experiment = ["u-ensemble", "pdm"]
-args_trials = 1
+# args_partition = "homo"
+# args_experiment = ["u-ensemble", "pdm"]
+# args_trials = 1
 #args_lr = 0.01
-args_epochs = 5
-args_reg = 1e-5
+# args_epochs = 5
+# args_reg = 1e-5
 args_alpha = 0.5
-args_communication_rounds = 5
-args_iter_epochs=None
+# args_communication_rounds = 5
+# args_iter_epochs=None
 
 args_pdm_sig = 1.0
 args_pdm_sig0 = 1.0
@@ -79,6 +93,10 @@ def add_fit_args(parser):
                             help='which type of communication strategy is going to be used: layerwise/blockwise')    
     parser.add_argument('--comm_round', type=int, default=10, 
                             help='how many round of communications we shoud use')  
+    parser.add_argument('--save', type=str, default='./tmp/checkpoints/', help='experiment path')
+    parser.add_argument('--note', type=str, default='try', help='note for this run')
+    parser.add_argument('--clients_per_round', type=int, default=-1, 
+                        help='number of clients trained per round')
     args = parser.parse_args()
     return args
 
@@ -152,7 +170,7 @@ def local_train(nets, args, net_dataidx_map, device="cpu"):
     # save local dataset
     local_datasets = []
     for net_id, net in nets.items():
-        if args.retrain:
+        if not args.retrain:
             dataidxs = net_dataidx_map[net_id]
             logger.info("Training network %s. n_training: %d" % (str(net_id), len(dataidxs)))
             # move the model to cuda device:
@@ -166,9 +184,9 @@ def local_train(nets, args, net_dataidx_map, device="cpu"):
             # switch to global test set here
             trainacc, testacc = train_net(net_id, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
             # saving the trained models here
-            save_model(net, net_id)
+            save_model(net, net_id, log_dir=args.save)
         else:
-            load_model(net, net_id, device=device)
+            load_model(net, net_id, device=device, log_dir=args.save)
 
     nets_list = list(nets.values())
     return nets_list
@@ -200,7 +218,7 @@ def local_retrain_dummy(local_datasets, weights, args, mode="bottom-up", freezin
         # [(9, 75), (9,), (19, 225), (19,), (475, 123), (123,), (123, 87), (87,), (87, 10), (10,)]
         if args.dataset in ("cifar10", "cinic10"):
             input_channel = 3
-        elif args.dataset == "mnist":
+        elif args.dataset in ("mnist", "femnist"):
             input_channel = 1
 
         num_filters = [weights[0].shape[0], weights[2].shape[0]]
@@ -211,7 +229,7 @@ def local_retrain_dummy(local_datasets, weights, args, mode="bottom-up", freezin
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=10)
+                                        output_dim=62 if args.dataset == "femnist" else 10)
     elif args.model == "moderate-cnn":
         #[(35, 27), (35,), (68, 315), (68,), (132, 612), (132,), (132, 1188), (132,), 
         #(260, 1188), (260,), (260, 2340), (260,), 
@@ -282,13 +300,13 @@ def local_retrain_dummy(local_datasets, weights, args, mode="bottom-up", freezin
                                                     input_dim=input_dim, 
                                                     hidden_dims=hidden_dims, 
                                                     output_dim=10)
-        elif args.dataset == "mnist":
+        elif args.dataset in ("mnist", "femnist"):
             matched_cnn = ModerateCNNContainer(1,
                                                 num_filters, 
                                                 kernel_size=3, 
                                                 input_dim=input_dim, 
                                                 hidden_dims=hidden_dims, 
-                                                output_dim=10)
+                                                output_dim=62 if args.dataset == "femnist" else 10)
     
     new_state_dict = {}
     model_counter = 0
@@ -431,7 +449,7 @@ def local_retrain(local_datasets, weights, args, mode="bottom-up", freezing_inde
         # [(9, 75), (9,), (19, 225), (19,), (475, 123), (123,), (123, 87), (87,), (87, 10), (10,)]
         if args.dataset in ("cifar10", "cinic10"):
             input_channel = 3
-        elif args.dataset == "mnist":
+        elif args.dataset in ("mnist", "femnist"):
             input_channel = 1
 
         num_filters = [weights[0].shape[0], weights[2].shape[0]]
@@ -442,7 +460,7 @@ def local_retrain(local_datasets, weights, args, mode="bottom-up", freezing_inde
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=10)
+                                        output_dim=62 if args.dataset == "femnist" else 10)
     elif args.model == "moderate-cnn":
         #[(35, 27), (35,), (68, 315), (68,), (132, 612), (132,), (132, 1188), (132,), 
         #(260, 1188), (260,), (260, 2340), (260,), 
@@ -513,13 +531,13 @@ def local_retrain(local_datasets, weights, args, mode="bottom-up", freezing_inde
                                                     input_dim=input_dim, 
                                                     hidden_dims=hidden_dims, 
                                                     output_dim=10)
-        elif args.dataset == "mnist":
+        elif args.dataset in ("mnist", "femnist"):
             matched_cnn = ModerateCNNContainer(1,
                                                 num_filters, 
                                                 kernel_size=3, 
                                                 input_dim=input_dim, 
                                                 hidden_dims=hidden_dims, 
-                                                output_dim=10)
+                                                output_dim=62 if args.dataset == "femnist" else 10)
     
     new_state_dict = {}
     model_counter = 0
@@ -736,7 +754,9 @@ def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
         # [(9, 75), (9,), (19, 225), (19,), (475, 123), (123,), (123, 87), (87,), (87, 10), (10,)]
         if args.dataset in ("cifar10", "cinic10"):
             input_channel = 3
-        elif args.dataset == "mnist":
+
+        # YI-LIN
+        elif args.dataset in ("mnist", "femnist"):
             input_channel = 1
 
         num_filters = [weights[0].shape[0], weights[2].shape[0]]
@@ -747,7 +767,7 @@ def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=10)
+                                        output_dim=62 if args.dataset == "femnist" else 10)
     elif args.model == "moderate-cnn":
         matched_cnn = ModerateCNN()
 
@@ -845,7 +865,7 @@ def local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu"):
         # [(9, 75), (9,), (19, 225), (19,), (475, 123), (123,), (123, 87), (87,), (87, 10), (10,)]
         if args.dataset in ("cifar10", "cinic10"):
             input_channel = 3
-        elif args.dataset == "mnist":
+        elif args.dataset in ("mnist", "femnist"):
             input_channel = 1
 
         num_filters = [weights[0].shape[0], weights[2].shape[0]]
@@ -856,7 +876,7 @@ def local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu"):
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=10)
+                                        output_dim=62 if args.dataset == "femnist" else 10)
     elif args.model == "moderate-cnn":
         matched_cnn = ModerateCNN()
 
@@ -961,7 +981,7 @@ def reconstruct_local_net(weights, args, ori_assignments=None, worker_index=0):
         # [(9, 75), (9,), (19, 225), (19,), (475, 123), (123,), (123, 87), (87,), (87, 10), (10,)]
         if args.dataset in ("cifar10", "cinic10"):
             input_channel = 3
-        elif args.dataset == "mnist":
+        elif args.dataset in ("mnist", "femnist"):
             input_channel = 1
 
         num_filters = [weights[0].shape[0], weights[2].shape[0]]
@@ -972,7 +992,7 @@ def reconstruct_local_net(weights, args, ori_assignments=None, worker_index=0):
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=10)
+                                        output_dim=62 if args.dataset == "femnist" else 10)
     elif args.model == "moderate-cnn":
         #[(35, 27), (35,), (68, 315), (68,), (132, 612), (132,), (132, 1188), (132,), 
         #(260, 1188), (260,), (260, 2340), (260,), 
@@ -1385,7 +1405,7 @@ def fedavg_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
     for cr in range(comm_round):
         retrained_nets = []
         logger.info("Communication round : {}".format(cr))
-        for worker_index in range(args.n_nets):
+        for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
             train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
             
@@ -1427,7 +1447,7 @@ def fedprox_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
     for cr in range(comm_round):
         retrained_nets = []
         logger.info("Communication round : {}".format(cr))
-        for worker_index in range(args.n_nets):
+        for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
             train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
             
@@ -1487,7 +1507,7 @@ def fedma_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
     for cr in range(comm_round):
         logger.info("Entering communication round: {} ...".format(cr))
         retrained_nets = []
-        for worker_index in range(args.n_nets):
+        for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
             train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
 
@@ -1506,11 +1526,22 @@ def fedma_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                                    train_dl_global,
                                    test_dl_global,
                                    n_classes,
-                                   args)
+                                   device=device,
+                                   args=args)
         batch_weights = [copy.deepcopy(hungarian_weights) for _ in range(args.n_nets)]
         del hungarian_weights
         del retrained_nets
 
+def create_exp_dir(path, scripts_to_save=None):
+    if not os.path.exists(path):
+        os.mkdir(path)
+    print('Experiment dir : {}'.format(path))
+
+    if scripts_to_save is not None:
+        os.mkdir(os.path.join(path, 'scripts'))
+        for script in scripts_to_save:
+            dst_file = os.path.join(path, 'scripts', os.path.basename(script))
+            shutil.copyfile(script, dst_file)
 
 if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1518,6 +1549,9 @@ if __name__ == "__main__":
     # Assuming that we are on a CUDA machine, this should print a CUDA device:
     logger.info(device)
     args = add_fit_args(argparse.ArgumentParser(description='Probabilistic Federated CNN Matching'))
+    args.save = '{}search-{}-{}'.format(args.save, args.note, time.strftime("%Y%m%d-%H%M%S"))
+    create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
+    logging.info("args = %s", args)
 
     seed = 0
 
@@ -1526,12 +1560,50 @@ if __name__ == "__main__":
 
     logger.info("Partitioning data")
 
-    if args.partition != "hetero-fbs":
-        y_train, net_dataidx_map, traindata_cls_counts = partition_data(args.dataset, args_datadir, args_logdir, 
-                                                                args.partition, args.n_nets, args_alpha, args=args)
+    #### YI-LIN
+    # add femnist
+    # changed files: main.py, utils.py, datasets.py
+    if args.dataset == 'femnist':
+
+        args_datadir = os.path.join(args_dataroot, args.dataset, 'data')
+
+        users, _, data = read_data(os.path.join(args_datadir, 'train'))
+
+        y_train = []
+
+        net_dataidx_map = {}
+        pre = 0
+        for i, (_, _data) in enumerate(data.items()):
+            y_train += _data['y']
+            net_dataidx_map[i] = np.arange(pre, pre + len(_data['y']))
+            pre += len(_data['y'])
+        
+        y_train = np.hstack(y_train)
+
+        # y_train = np.hstack(y_train)
+
+        # net_dataidx_map = {i:u for i, u in enumerate(users)}
+
+        traindata_cls_counts = record_net_data_stats(y_train, net_dataidx_map, None)
+
+        train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 32)
+
+        setattr(args, "n_nets", len(users))
+
     else:
-        y_train, net_dataidx_map, traindata_cls_counts, baseline_indices = partition_data(args.dataset, args_datadir, args_logdir, 
-                                                    args.partition, args.n_nets, args_alpha, args=args)
+        if args.partition != "hetero-fbs":
+            y_train, net_dataidx_map, traindata_cls_counts = partition_data(args.dataset, args_datadir, args_logdir, 
+                                                                    args.partition, args.n_nets, args_alpha, args=args)
+        else:
+            y_train, net_dataidx_map, traindata_cls_counts, baseline_indices = partition_data(args.dataset, args_datadir, args_logdir, 
+                                                        args.partition, args.n_nets, args_alpha, args=args)
+
+            train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 32)
+
+    # YI-LIN
+    print("num of clients: ", args.n_nets)
+    if args.clients_per_round == -1:
+        setattr(args, "clients_per_round", args.n_nets)
 
     n_classes = len(np.unique(y_train))
     averaging_weights = np.zeros((args.n_nets, n_classes), dtype=np.float32)
@@ -1556,8 +1628,6 @@ if __name__ == "__main__":
 
     ### local training stage
     nets_list = local_train(nets, args, net_dataidx_map, device=device)
-
-    train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 32)
 
     # ensemble part of experiments
     logger.info("Computing Uniform ensemble accuracy")
@@ -1600,21 +1670,13 @@ if __name__ == "__main__":
     for aw in averaged_weights:
         logger.info(aw.shape)
 
+    
+    # print(args)
 
     models = nets_list
-    _ = compute_full_cnn_accuracy(models,
-                               hungarian_weights,
-                               train_dl_global,
-                               test_dl_global,
-                               n_classes,
-                               args)
+    _ = compute_full_cnn_accuracy(models, hungarian_weights, train_dl_global, test_dl_global, n_classes, device, args)
 
-    _ = compute_model_averaging_accuracy(models, 
-                                averaged_weights, 
-                                train_dl_global, 
-                                test_dl_global, 
-                                n_classes,
-                                args)
+    _ = compute_model_averaging_accuracy(models, averaged_weights, train_dl_global, test_dl_global, n_classes, args)
 
 
     if args.comm_type == "fedavg":
