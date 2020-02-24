@@ -6,6 +6,8 @@ import glob
 import os
 import shutil
 from sklearn.preprocessing import normalize
+import torch.multiprocessing as mp ##@ 
+from torch.multiprocessing import Process, Lock, Manager
 
 from datasets import read_data
 
@@ -19,18 +21,19 @@ from matching_performance import compute_model_averaging_accuracy, compute_pdm_c
 # logging.basicConfig()
 # logger = logging.getLogger()
 # logger.setLevel(logging.INFO)
-log_format = '%(asctime)s %(message)s'
-logging.basicConfig(stream=sys.stdout, level=logging.INFO,
-    format=log_format, datefmt='%m/%d %I:%M:%S %p')
-fh = logging.FileHandler(os.path.join('log1.txt'))
-fh.setFormatter(logging.Formatter(log_format))
-logging.getLogger().addHandler(fh)
+# log_format = '%(asctime)s %(message)s'
+# logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+#     format=log_format, datefmt='%m/%d %I:%M:%S %p')
+# fh = logging.FileHandler(os.path.join('log1.txt'))
+# fh.setFormatter(logging.Formatter(log_format))
+# logging.getLogger().addHandler(fh)
 
 
 args_logdir = "logs/cifar10"
 #args_dataset = "cifar10"
 args_datadir = "./data/cifar10"
-args_dataroot = "/work/ntubiggg1/dataset"
+# args_dataroot = "/work/ntubiggg1/dataset"
+args_dataroot = "/work/ntubiggg1/collabrative_files/federated_learning/leaf/data/"
 # args_init_seed = 0
 args_net_config = [3072, 100, 10]
 #args_partition = "hetero-dir"
@@ -97,6 +100,7 @@ def add_fit_args(parser):
     parser.add_argument('--note', type=str, default='try', help='note for this run')
     parser.add_argument('--clients_per_round', type=int, default=-1, 
                         help='number of clients trained per round')
+    parser.add_argument('--multiprocess', type=bool, default=False, help='whether to use multiprocessing')
     args = parser.parse_args()
     return args
 
@@ -165,28 +169,59 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args, 
     logger.info(' ** Training complete **')
     return train_acc, test_acc
 
+def get_local_train_net(args, worker_index, dataidxs, net, device):
+    logger.info("Training network %s. n_training: %d" % (str(worker_index), len(dataidxs)))
+    # move the model to cuda device:
+    net.to(device)
+
+    train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+    train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
+    trainacc, testacc = train_net(worker_index, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
+    save_model(net, worker_index, log_dir=args.save)
 
 def local_train(nets, args, net_dataidx_map, device="cpu"):
     # save local dataset
     local_datasets = []
-    for net_id, net in nets.items():
-        if not args.retrain:
-            dataidxs = net_dataidx_map[net_id]
-            logger.info("Training network %s. n_training: %d" % (str(net_id), len(dataidxs)))
-            # move the model to cuda device:
-            net.to(device)
+    if args.multiprocess:
+        mp.set_start_method('spawn', force=True)
+        processes = []
 
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
-            train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 32)
+        for net_id, net in nets.items():
+            if not args.retrain:
+                device = 'cuda:%d'%(net_id%4) # TODO: adaptive gpu_num
+                p = mp.Process(target=get_local_train_net, args=(args, net_id, net_dataidx_map[net_id], net, device))
+                # We first train the model across `num_processes` processes
+                p.start()
+                processes.append(p)
 
-            local_datasets.append((train_dl_local, test_dl_local))
+            else:
+                load_model(net, net_id, device=device, log_dir="../../FedMA-FedAvg/tmp/checkpoints/search-try-20200220-002252/") ##@ no need to redo local_train
+                # load_model(net, net_id, device=device, log_dir=args.save)
+            
+            if len(processes)>=8: # restrict maximum processes
+                for p in processes:
+                    p.join()
 
-            # switch to global test set here
-            trainacc, testacc = train_net(net_id, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
-            # saving the trained models here
-            save_model(net, net_id, log_dir=args.save)
-        else:
-            load_model(net, net_id, device=device, log_dir=args.save)
+    else:
+        for net_id, net in nets.items():
+            if not args.retrain:
+                dataidxs = net_dataidx_map[net_id]
+                logger.info("Training network %s. n_training: %d" % (str(net_id), len(dataidxs)))
+                # move the model to cuda device:
+                net.to(device)
+
+                train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+                train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
+
+                local_datasets.append((train_dl_local, test_dl_local))
+
+                # switch to global test set here
+                trainacc, testacc = train_net(net_id, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
+                # saving the trained models here
+                save_model(net, net_id, log_dir=args.save)
+            else:
+                load_model(net, net_id, device=device, log_dir="../../FedMA-FedAvg/tmp/checkpoints/search-try-20200220-002252/") ##@ no need to redo local_train
+                # load_model(net, net_id, device=device, log_dir=args.save)
 
     nets_list = list(nets.values())
     return nets_list
@@ -1203,7 +1238,7 @@ def oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map,
         retrained_nets = []
         for worker_index in range(num_workers):
             dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
             logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
             retrained_cnn = local_retrain_dummy((train_dl_local,test_dl_local), tempt_weights[worker_index], args, 
                                             freezing_index=(2 * (layer_index + 1) - 2), device=device)
@@ -1248,6 +1283,14 @@ def oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map,
     matched_weights.append(avg_last_layer_weight[-1, :])
     return matched_weights, assignments_list
 
+def get_retrained_net(args, layer_index, worker_index, dataidxs, tmp_weight, device, d, lock):
+
+    train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+    logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
+    retrained_cnn = local_retrain((train_dl_local,test_dl_local), tmp_weight, args, 
+                                    freezing_index=(2 * (layer_index + 1) - 2), device=device)
+    with lock:
+        d[worker_index]=retrained_cnn.cpu()
 
 def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map, 
                             averaging_weights, args, 
@@ -1342,15 +1385,32 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
             for lid in range(2 * (layer_index + 1) - 1, len(batch_weights[0])):
                 tempt_weights[worker_index].append(batch_weights[worker_index][lid])
 
-        retrained_nets = []
-        for worker_index in range(num_workers):
-            dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+        device_list = ['cuda:%d'%(i%3) for i in range(num_workers)] # TODO: adaptive gpu_num
+        mp.set_start_method('spawn', force=True)
+        m = Manager()
+        d = m.dict()
+        lock = Lock()
 
-            logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
-            retrained_cnn = local_retrain((train_dl_local,test_dl_local), tempt_weights[worker_index], args, 
-                                            freezing_index=(2 * (layer_index + 1) - 2), device=device)
-            retrained_nets.append(retrained_cnn)
+
+        processes = []
+        for rank in range(num_workers):
+            p = mp.Process(target=get_retrained_net, args=(args, layer_index, rank, net_dataidx_map[rank], tempt_weights[rank], device_list[rank], d, lock))
+            # We first train the model across `num_processes` processes
+            p.start()
+            processes.append(p)
+        for p in processes:
+            p.join()
+        retrained_nets = [d[rank] for rank in range(num_workers)]
+
+        # retrained_nets = []
+        # for worker_index in range(num_workers):
+        #     dataidxs = net_dataidx_map[worker_index]
+        #     train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+
+        #     logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
+        #     retrained_cnn = local_retrain((train_dl_local,test_dl_local), tempt_weights[worker_index], args, 
+        #                                     freezing_index=(2 * (layer_index + 1) - 2), device=device)
+        #     retrained_nets.append(retrained_cnn)
         batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
 
     ## we handle the last layer carefully here ...
@@ -1407,7 +1467,7 @@ def fedavg_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
         logger.info("Communication round : {}".format(cr))
         for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
             
             # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
             retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), batch_weights[worker_index], args, device=device)
@@ -1449,7 +1509,7 @@ def fedprox_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
         logger.info("Communication round : {}".format(cr))
         for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
             
             # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
             # local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu")
@@ -1509,7 +1569,7 @@ def fedma_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
         retrained_nets = []
         for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
 
             # for the "squeezing" mode, we pass assignment list wrt this worker to the `local_retrain` function
             recons_local_net = reconstruct_local_net(batch_weights[worker_index], args, ori_assignments=assignments_list, worker_index=worker_index)
@@ -1544,13 +1604,23 @@ def create_exp_dir(path, scripts_to_save=None):
             shutil.copyfile(script, dst_file)
 
 if __name__ == "__main__":
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # Assuming that we are on a CUDA machine, this should print a CUDA device:
-    logger.info(device)
     args = add_fit_args(argparse.ArgumentParser(description='Probabilistic Federated CNN Matching'))
     args.save = '{}search-{}-{}'.format(args.save, args.note, time.strftime("%Y%m%d-%H%M%S"))
     create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    # Assuming that we are on a CUDA machine, this should print a CUDA device:
+    log_format = '%(asctime)s %(message)s'
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+        format=log_format, datefmt='%m/%d %I:%M:%S %p')
+    fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
+    fh.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(fh)
+
+    logger.info(device)
+    
     logging.info("args = %s", args)
 
     seed = 0
@@ -1586,7 +1656,7 @@ if __name__ == "__main__":
 
         traindata_cls_counts = record_net_data_stats(y_train, net_dataidx_map, None)
 
-        train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 32)
+        train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
 
         setattr(args, "n_nets", len(users))
 
@@ -1598,7 +1668,7 @@ if __name__ == "__main__":
             y_train, net_dataidx_map, traindata_cls_counts, baseline_indices = partition_data(args.dataset, args_datadir, args_logdir, 
                                                         args.partition, args.n_nets, args_alpha, args=args)
 
-            train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 32)
+        train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
 
     # YI-LIN
     print("num of clients: ", args.n_nets)
