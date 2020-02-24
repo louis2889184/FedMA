@@ -1009,9 +1009,10 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
                                 std=[x/255.0 for x in [63.0, 62.1, 66.7]])
             transform_train = transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Lambda(lambda x: F.pad(
-                                    Variable(x.unsqueeze(0), requires_grad=False),
-                                    (4,4,4,4),mode='reflect').data.squeeze()),
+                ### multiprocessing not allow lambda function
+                # transforms.Lambda(lambda x: F.pad(
+                #                     Variable(x.unsqueeze(0), requires_grad=False),
+                #                     (4,4,4,4),mode='reflect').data.squeeze()),
                 transforms.ToPILImage(),
                 transforms.RandomCrop(32),
                 transforms.RandomHorizontalFlip(),
@@ -1036,8 +1037,8 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
         train_ds = dl_obj(datadir, dataidxs=dataidxs, train=True, transform=transform_train, download=True)
         test_ds = dl_obj(datadir, train=False, transform=transform_test, download=True)
 
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=0)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=0)
+        train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=2)
+        test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=2)
 
     elif dataset == 'cinic10':
         # statistic for normalizing the dataset
@@ -1049,8 +1050,8 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
         training_set = ImageFolderTruncated(cinic_directory + '/cinic-10-trainlarge/train', 
                                                                         dataidxs=dataidxs,
                                                                         transform=transforms.Compose([transforms.ToTensor(),
-                                                                                                     transforms.Lambda(lambda x: F.pad(Variable(x.unsqueeze(0), requires_grad=False),
-                                                                                                     (4,4,4,4),mode='reflect').data.squeeze()),
+                                                                                                    #  transforms.Lambda(lambda x: F.pad(Variable(x.unsqueeze(0), requires_grad=False),
+                                                                                                    #  (4,4,4,4),mode='reflect').data.squeeze()),
                                                                                                      transforms.ToPILImage(),
                                                                                                      transforms.RandomCrop(32),
                                                                                                      transforms.RandomHorizontalFlip(),
@@ -1083,9 +1084,9 @@ def get_dataloader_dist_skew(dataset, datadir, train_bs, test_bs, dataidxs=None,
 
             transform_train_color = transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Lambda(lambda x: F.pad(
-                                    Variable(x.unsqueeze(0), requires_grad=False),
-                                    (4,4,4,4),mode='reflect').data.squeeze()),
+                # transforms.Lambda(lambda x: F.pad(
+                #                     Variable(x.unsqueeze(0), requires_grad=False),
+                #                     (4,4,4,4),mode='reflect').data.squeeze()),
                 transforms.ToPILImage(),
                 transforms.RandomCrop(32),
                 transforms.RandomHorizontalFlip(),
@@ -1095,9 +1096,9 @@ def get_dataloader_dist_skew(dataset, datadir, train_bs, test_bs, dataidxs=None,
 
             transform_train_gray_scale = transforms.Compose([
                 transforms.ToTensor(),
-                transforms.Lambda(lambda x: F.pad(
-                                    Variable(x.unsqueeze(0), requires_grad=False),
-                                    (4,4,4,4),mode='reflect').data.squeeze()),
+                # transforms.Lambda(lambda x: F.pad(
+                #                     Variable(x.unsqueeze(0), requires_grad=False),
+                #                     (4,4,4,4),mode='reflect').data.squeeze()),
                 transforms.ToPILImage(),
                 transforms.RandomCrop(32),
                 transforms.RandomHorizontalFlip(),
