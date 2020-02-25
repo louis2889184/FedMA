@@ -161,17 +161,17 @@ def block_patching(w_j, L_next, assignment_j_c, layer_index, model_meta_data,
         if network_name == "simple-cnn":
             if dataset in ("cifar10", "cinic10"):
                 shape_estimator = SimpleCNNContainerConvBlocks(input_channel=3, num_filters=matching_shapes, kernel_size=5)
-            elif dataset == "mnist":
+            elif dataset in ("mnist", "femnist"):
                 shape_estimator = SimpleCNNContainerConvBlocks(input_channel=1, num_filters=matching_shapes, kernel_size=5)
         elif network_name == "moderate-cnn":
             if dataset in ("cifar10", "cinic10"):
                 shape_estimator = ModerateCNNContainerConvBlocks(num_filters=matching_shapes)
-            elif dataset == "mnist":
+            elif dataset in ("mnist", "femnist"):
                 shape_estimator = ModerateCNNContainerConvBlocksMNIST(num_filters=matching_shapes)
 
         if dataset in ("cifar10", "cinic10"):
             dummy_input = torch.rand(1, 3, 32, 32)
-        elif dataset == "mnist":
+        elif dataset in ("mnist", "femnist"):
             dummy_input = torch.rand(1, 1, 28, 28)
         estimated_output = shape_estimator(dummy_input)
         new_w_j = np.zeros((w_j.shape[0], estimated_output.view(-1).size()[0]))

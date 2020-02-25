@@ -177,8 +177,8 @@ def get_local_train_net(args, worker_index, dataidxs, net, device, args_datadir,
     # move the model to cuda device:
     net.to(device)
 
-    train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
-    train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
+    train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
+    train_dl_global, test_dl_global = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512)
     trainacc, testacc = train_net(worker_index, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
 
     save_model(net, worker_index, log_dir=args.save)
@@ -231,8 +231,8 @@ def local_train(nets, args, net_dataidx_map, device="cpu"):
                 # move the model to cuda device:
                 net.to(device)
 
-                train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
-                train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
+                train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
+                train_dl_global, test_dl_global = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512)
 
                 local_datasets.append((train_dl_local, test_dl_local))
 
@@ -282,7 +282,7 @@ def local_retrain_dummy(local_datasets, weights, args, mode="bottom-up", freezin
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=62 if args.dataset == "femnist" else 10)
+                                        output_dim=args.n_class)
     elif args.model == "moderate-cnn":
         #[(35, 27), (35,), (68, 315), (68,), (132, 612), (132,), (132, 1188), (132,), 
         #(260, 1188), (260,), (260, 2340), (260,), 
@@ -352,14 +352,14 @@ def local_retrain_dummy(local_datasets, weights, args, mode="bottom-up", freezin
                                                     kernel_size=3, 
                                                     input_dim=input_dim, 
                                                     hidden_dims=hidden_dims, 
-                                                    output_dim=10)
+                                                    output_dim=args.n_class)
         elif args.dataset in ("mnist", "femnist"):
             matched_cnn = ModerateCNNContainer(1,
                                                 num_filters, 
                                                 kernel_size=3, 
                                                 input_dim=input_dim, 
                                                 hidden_dims=hidden_dims, 
-                                                output_dim=62 if args.dataset == "femnist" else 10)
+                                                output_dim=args.n_class)
     
     new_state_dict = {}
     model_counter = 0
@@ -513,7 +513,7 @@ def local_retrain(local_datasets, weights, args, mode="bottom-up", freezing_inde
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=62 if args.dataset == "femnist" else 10)
+                                        output_dim=args.n_class)
     elif args.model == "moderate-cnn":
         #[(35, 27), (35,), (68, 315), (68,), (132, 612), (132,), (132, 1188), (132,), 
         #(260, 1188), (260,), (260, 2340), (260,), 
@@ -583,14 +583,14 @@ def local_retrain(local_datasets, weights, args, mode="bottom-up", freezing_inde
                                                     kernel_size=3, 
                                                     input_dim=input_dim, 
                                                     hidden_dims=hidden_dims, 
-                                                    output_dim=10)
+                                                    output_dim=args.n_class)
         elif args.dataset in ("mnist", "femnist"):
             matched_cnn = ModerateCNNContainer(1,
                                                 num_filters, 
                                                 kernel_size=3, 
                                                 input_dim=input_dim, 
                                                 hidden_dims=hidden_dims, 
-                                                output_dim=62 if args.dataset == "femnist" else 10)
+                                                output_dim=args.n_class)
     
     new_state_dict = {}
     model_counter = 0
@@ -820,7 +820,7 @@ def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=62 if args.dataset == "femnist" else 10)
+                                        output_dim=args.n_class)
     elif args.model == "moderate-cnn":
         matched_cnn = ModerateCNN()
 
@@ -929,7 +929,7 @@ def local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu"):
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=62 if args.dataset == "femnist" else 10)
+                                        output_dim=args.n_class)
     elif args.model == "moderate-cnn":
         matched_cnn = ModerateCNN()
 
@@ -1045,7 +1045,7 @@ def reconstruct_local_net(weights, args, ori_assignments=None, worker_index=0):
                                         kernel_size=5, 
                                         input_dim=input_dim, 
                                         hidden_dims=hidden_dims, 
-                                        output_dim=62 if args.dataset == "femnist" else 10)
+                                        output_dim=args.n_class)
     elif args.model == "moderate-cnn":
         #[(35, 27), (35,), (68, 315), (68,), (132, 612), (132,), (132, 1188), (132,), 
         #(260, 1188), (260,), (260, 2340), (260,), 
@@ -1165,7 +1165,7 @@ def oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map,
     # starting the neural matching
     models = nets_list
     cls_freqs = traindata_cls_counts
-    n_classes = args_net_config[-1]
+    n_classes = args.n_class
     it=5
     sigma=args_pdm_sig 
     sigma0=args_pdm_sig0
@@ -1256,7 +1256,7 @@ def oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map,
         retrained_nets = []
         for worker_index in range(num_workers):
             dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+            train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
             logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
             retrained_cnn = local_retrain_dummy((train_dl_local,test_dl_local), tempt_weights[worker_index], args, 
                                             freezing_index=(2 * (layer_index + 1) - 2), device=device)
@@ -1303,7 +1303,7 @@ def oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map,
 
 def get_retrained_net(args, layer_index, worker_index, dataidxs, tmp_weight, device, d, lock):
 
-    train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+    train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
     logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
     retrained_cnn = local_retrain((train_dl_local,test_dl_local), tmp_weight, args, 
                                     freezing_index=(2 * (layer_index + 1) - 2), device=device)
@@ -1316,7 +1316,7 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
     # starting the neural matching
     models = nets_list
     cls_freqs = traindata_cls_counts
-    n_classes = args_net_config[-1]
+    n_classes = args.n_class
     it=5
     sigma=args_pdm_sig 
     sigma0=args_pdm_sig0
@@ -1570,7 +1570,7 @@ def fedprox_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
         logger.info("Communication round : {}".format(cr))
         for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+            train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
             
             # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
             # local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu")
@@ -1621,7 +1621,7 @@ def fedma_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
     sigma0 = 1.0
 
     cls_freqs = traindata_cls_counts
-    n_classes = 10
+    n_classes = args.n_class
     batch_freqs = pdm_prepare_freq(cls_freqs, n_classes)
     it=5
 
@@ -1630,7 +1630,7 @@ def fedma_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
         retrained_nets = []
         for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
             dataidxs = net_dataidx_map[worker_index]
-            train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
+            train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
 
             # for the "squeezing" mode, we pass assignment list wrt this worker to the `local_retrain` function
             recons_local_net = reconstruct_local_net(batch_weights[worker_index], args, ori_assignments=assignments_list, worker_index=worker_index)
@@ -1724,6 +1724,7 @@ if __name__ == "__main__":
         train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
 
         setattr(args, "n_nets", len(users))
+        
 
     else:
         if args.partition != "hetero-fbs":
@@ -1735,12 +1736,16 @@ if __name__ == "__main__":
 
         train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
 
+    setattr(args, "args_datadir", args_datadir)
+
     # YI-LIN
     print("num of clients: ", args.n_nets)
     if args.clients_per_round == -1:
         setattr(args, "clients_per_round", args.n_nets)
 
     n_classes = len(np.unique(y_train))
+    setattr(args, 'n_class', n_classes)
+    
     averaging_weights = np.zeros((args.n_nets, n_classes), dtype=np.float32)
 
     for i in range(n_classes):
