@@ -90,7 +90,7 @@ def add_fit_args(parser):
     parser.add_argument('--oneshot_matching', type=bool, default=False, metavar='OM',
                         help='if the code is going to conduct one shot matching')
     parser.add_argument('--retrain', type=bool, default=False, 
-                            help='whether to retrain the model or load model locally') # TODO: Confusing: retrain=True means *NO* retrain
+                            help='whether to retrain the model or load model locally')
     parser.add_argument('--rematching', type=bool, default=False, 
                             help='whether to recalculating the matching process (this is for speeding up the debugging process)')
     parser.add_argument('--comm_type', type=str, default='layerwise', 
@@ -103,6 +103,7 @@ def add_fit_args(parser):
                         help='number of clients trained per round')
     parser.add_argument('--multiprocess', type=bool, default=False, help='whether to use multiprocessing')
     parser.add_argument('--gpu', type=str, default='0', help='gpu index')
+    parser.add_argument('--pretrained_model_dir', type=str, default='./tmp/checkpoints/xxx/', help='load model from')
     args = parser.parse_args()
     return args
 
@@ -171,7 +172,7 @@ def train_net(net_id, net, train_dataloader, test_dataloader, epochs, lr, args, 
     logger.info(' ** Training complete **')
     return train_acc, test_acc
 
-def get_local_train_net(args, worker_index, dataidxs, net, device, args_datadir):
+def get_local_train_net(args, worker_index, dataidxs, net, device, args_datadir, d, lock):
     logger.info("Training network %s. n_training: %d" % (str(worker_index), len(dataidxs)))
     # move the model to cuda device:
     net.to(device)
@@ -179,39 +180,52 @@ def get_local_train_net(args, worker_index, dataidxs, net, device, args_datadir)
     train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
     train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
     trainacc, testacc = train_net(worker_index, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
-    net.cpu()
+
     save_model(net, worker_index, log_dir=args.save)
+    with lock:
+        d[worker_index]=net.cpu()
 
 def local_train(nets, args, net_dataidx_map, device="cpu"):
     # save local dataset
     local_datasets = []
-    if args.multiprocess:
-        mp.set_start_method('spawn', force=True)
-        processes = []
 
-        for net_id, net in nets.items():
-            if not args.retrain:
+    if not args.retrain:
+        try:
+            for net_id, net in nets.items():
+                load_model(net, net_id, device=device, log_dir=args.pretrained_model_dir)
+            nets_list = list(nets.values())
+        except:
+            print("fail to load models....")
+            print("retraining...")
+            args.retrain = True
+            return local_train(nets, args, net_dataidx_map, device)
+
+    else:
+        if args.multiprocess:
+            mp.set_start_method('spawn', force=True)
+            m = Manager()
+            d = m.dict()
+            lock = Lock()
+            processes = []
+            for net_id, net in nets.items():
                 device_idx = 'cuda:%d'%(net_id%args.gpu_num)
-                p = mp.Process(target=get_local_train_net, args=(args, net_id, net_dataidx_map[net_id], net, device_idx, args_datadir))
+                p = mp.Process(target=get_local_train_net, args=(args, net_id, net_dataidx_map[net_id], net, device_idx, args_datadir, d, lock))
                 # We first train the model across `num_processes` processes
                 p.start()
                 processes.append(p)
-
-            else:
-                load_model(net, net_id, device=device, log_dir="tmp/checkpoints/search-try-20200224-153331/") ##@ no need to redo local_train
-                # load_model(net, net_id, device=device, log_dir=args.save)
             
-            if len(processes)>=16: # restrict maximum processes
-                for p in processes:
-                    p.join()
-                processes = []
+                if len(processes)>=16: # restrict maximum processes
+                    for p in processes:
+                        p.join()
+                    processes = []
         
-        for p in processes:
-            p.join()
+            for p in processes:
+                p.join()
+            
+            nets_list = [d[rank] for rank in d]
 
-    else:
-        for net_id, net in nets.items():
-            if not args.retrain:
+        else:
+            for net_id, net in nets.items():
                 dataidxs = net_dataidx_map[net_id]
                 logger.info("Training network %s. n_training: %d" % (str(net_id), len(dataidxs)))
                 # move the model to cuda device:
@@ -226,11 +240,8 @@ def local_train(nets, args, net_dataidx_map, device="cpu"):
                 trainacc, testacc = train_net(net_id, net, train_dl_local, test_dl_global, args.epochs, args.lr, args, device=device)
                 # saving the trained models here
                 save_model(net, net_id, log_dir=args.save)
-            else:
-                load_model(net, net_id, device=device, log_dir="tmp/checkpoints/search-femnist-20200224-144352/") ##@ no need to redo local_train
-                # load_model(net, net_id, device=device, log_dir=args.save)
+            nets_list = list(nets.values())
 
-    nets_list = list(nets.values())
     return nets_list
 
 
@@ -1507,7 +1518,7 @@ def fedavg_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
             for p in processes:
                 p.join()
             retrained_nets = [d[rank] for rank in d]
-            
+
         else:
             retrained_nets = []
             for worker_index in random.sample(range(args.n_nets), args.clients_per_round):

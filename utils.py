@@ -1228,6 +1228,7 @@ def compute_ensemble_accuracy(models: list, dataloader, n_classes, train_cls_cou
         if model.training:
             was_training[i] = True
             model.eval()
+            model = model.to(device)
 
     if uniform_weights is True:
         weights_list = prepare_uniform_weights(n_classes, len(models))
@@ -1238,7 +1239,7 @@ def compute_ensemble_accuracy(models: list, dataloader, n_classes, train_cls_cou
 
     weights_norm = normalize_weights(weights_list)
 
-    model = model.to(device)
+    
     with torch.no_grad():
         for batch_idx, (x, target) in enumerate(dataloader):
             x, target = x.to(device), target.to(device)
