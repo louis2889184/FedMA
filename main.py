@@ -1403,40 +1403,36 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
             for lid in range(2 * (layer_index + 1) - 1, len(batch_weights[0])):
                 tempt_weights[worker_index].append(batch_weights[worker_index][lid])
 
-
-        if args.multiprocess:
-            device_list = ['cuda:%d'%(i%args.gpu_num) for i in range(num_workers)]
-            mp.set_start_method('spawn', force=True)
-            m = Manager()
-            d = m.dict()
-            lock = Lock()
+        device_list = ['cuda:%d'%(i%args.gpu_num) for i in range(num_workers)]
+        mp.set_start_method('spawn', force=True)
+        m = Manager()
+        d = m.dict()
+        lock = Lock()
 
 
-            processes = []
-            for rank in range(num_workers):
-                p = mp.Process(target=get_retrained_net, args=(args, layer_index, rank, net_dataidx_map[rank], tempt_weights[rank], device_list[rank], d, lock))
-                # We first train the model across `num_processes` processes
-                p.start()
-                processes.append(p)
-                if len(processes)>=16: # restrict maximum processes
-                    for p in processes:
-                        p.join()
-                    processes = []
-            for p in processes:
-                p.join()
-            retrained_nets = [d[rank] for rank in range(num_workers)]
-        
-        else:
-            retrained_nets = []
-            for worker_index in range(num_workers):
-                dataidxs = net_dataidx_map[worker_index]
-                train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+        processes = []
+        for rank in range(num_workers):
+            p = mp.Process(target=get_retrained_net, args=(args, layer_index, rank, net_dataidx_map[rank], tempt_weights[rank], device_list[rank], d, lock))
+            # We first train the model across `num_processes` processes
+            p.start()
+            processes.append(p)
+            if len(processes)>=16: # restrict maximum processes
+                for p in processes:
+                    p.join()
+                processes = []
+        for p in processes:
+            p.join()
+        retrained_nets = [d[rank] for rank in range(num_workers)]
 
-                logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
-                retrained_cnn = local_retrain((train_dl_local,test_dl_local), tempt_weights[worker_index], args, 
-                                                freezing_index=(2 * (layer_index + 1) - 2), device=device)
-                retrained_nets.append(retrained_cnn)
-        
+        # retrained_nets = []
+        # for worker_index in range(num_workers):
+        #     dataidxs = net_dataidx_map[worker_index]
+        #     train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 32, dataidxs)
+
+        #     logger.info("Re-training on local worker: {}, starting from layer: {}".format(worker_index, 2 * (layer_index + 1) - 2))
+        #     retrained_cnn = local_retrain((train_dl_local,test_dl_local), tempt_weights[worker_index], args, 
+        #                                     freezing_index=(2 * (layer_index + 1) - 2), device=device)
+        #     retrained_nets.append(retrained_cnn)
         batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
 
     ## we handle the last layer carefully here ...
@@ -1712,6 +1708,9 @@ if __name__ == "__main__":
             y_train += _data['y']
             net_dataidx_map[i] = np.arange(pre, pre + len(_data['y']))
             pre += len(_data['y'])
+
+            # if i > 3:
+            #     break
         
         y_train = np.hstack(y_train)
 
@@ -1723,7 +1722,7 @@ if __name__ == "__main__":
 
         train_dl_global, test_dl_global = get_dataloader(args.dataset, args_datadir, args.batch_size, 512)
 
-        setattr(args, "n_nets", len(users))
+        setattr(args, "n_nets", len(net_dataidx_map))
         
 
     else:

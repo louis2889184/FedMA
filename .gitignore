@@ -3,6 +3,9 @@ __pycache__
 *.txt
 tmp
 
+data
+matching_weights_cache
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
