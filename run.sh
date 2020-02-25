@@ -14,19 +14,39 @@
 # --rematching=
 
 python main.py --model=moderate-cnn \
---dataset=femnist \
+--dataset=cifar10 \
 --lr=0.01 \
 --retrain_lr=0.01 \
 --batch-size=64 \
---epochs=5 \
---retrain_epochs=20 \
---n_nets=16 \
+--epochs=3 \
+--retrain_epochs=3 \
+--n_nets=2 \
 --partition=hetero-dir \
 --comm_type=fedavg \
---comm_round=1000 \
---rematching=True \
---note femnist \
---clients_per_round 5
+--comm_round=3 \
+--oneshot_matching= \
+--rematching= \
+--retrain= \
+--gpu=1 \
+--multiprocess=True \
+--pretrained_model_dir=tmp/checkpoints/search-try-20200225-100828/
+
+# python main.py --model=moderate-cnn \
+# --dataset=femnist \
+# --lr=0.01 \
+# --retrain_lr=0.01 \
+# --batch-size=64 \
+# --epochs=5 \
+# --retrain_epochs=20 \
+# --n_nets=16 \
+# --partition=hetero-dir \
+# --comm_type=fedavg \
+# --comm_round=1000 \
+# --rematching=True \
+# --note femnist \
+# --clients_per_round 5 \
+# --multiprocess=True \
+# --retrain=True
 
 # python main.py --model=moderate-cnn \
 # --dataset=cifar10 \
