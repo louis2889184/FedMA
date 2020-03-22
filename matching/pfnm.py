@@ -36,7 +36,7 @@ def rpc_parallel(global_weights, weights_j, sij_p_gs, red_term, iter_range):
     res = np.array([(((weights_j[ir] + global_weights) ** 2 / sij_p_gs).sum(axis=1) - red_term) for ir in iter_range])
     return res
 
-
+### Liang
 def compute_cost(global_weights, weights_j, global_sigmas, sigma_inv_j, prior_mean_norm, prior_inv_sigma,
                  popularity_counts, gamma, J):
 
@@ -73,7 +73,7 @@ def compute_cost(global_weights, weights_j, global_sigmas, sigma_inv_j, prior_me
     full_cost = np.hstack((param_cost, nonparam_cost)).astype(np.float32)
     return full_cost
 
-
+### Liang
 def matching_upd_j(weights_j, global_weights, sigma_inv_j, global_sigmas, prior_mean_norm, prior_inv_sigma,
                    popularity_counts, gamma, J):
 
@@ -168,6 +168,10 @@ def block_patching(w_j, L_next, assignment_j_c, layer_index, model_meta_data,
                 shape_estimator = ModerateCNNContainerConvBlocks(num_filters=matching_shapes)
             elif dataset in ("mnist", "femnist"):
                 shape_estimator = ModerateCNNContainerConvBlocksMNIST(num_filters=matching_shapes)
+        elif network_name == "vgg":
+            if dataset in ("cifar10", "cinic10"):
+                print(matching_shapes)
+                shape_estimator = matched_vgg11_d(matching_shapes)
 
         if dataset in ("cifar10", "cinic10"):
             dummy_input = torch.rand(1, 3, 32, 32)
@@ -207,7 +211,7 @@ def process_softmax_bias(batch_weights, last_layer_const, sigma, sigma0):
     softmax_inv_sigma = 1 / sigma0_bias + sum(softmax_inv_sigma)
     return softmax_bias, softmax_inv_sigma
 
-
+### Liang: going to modify
 def match_layer(weights_bias, sigma_inv_layer, mean_prior, sigma_inv_prior, gamma, it):
     J = len(weights_bias)
 
@@ -796,7 +800,7 @@ def layer_wise_group_descent_spahm(batch_weights, layer_index, batch_frequencies
         logger.info("Branch layer index, Layer index: {}, Global weights out shapes: {}".format(layer_index, [gwo.shape for gwo in global_weights_out]))
     return map_out, assignment_c, L_next
 
-
+### Liang: going to modify
 def layer_wise_group_descent(batch_weights, layer_index, batch_frequencies, sigma_layers, 
                                 sigma0_layers, gamma_layers, it, 
                                 model_meta_data, 

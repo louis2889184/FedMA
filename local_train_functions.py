@@ -8,6 +8,7 @@ import shutil
 import random
 import torch.multiprocessing as mp
 from torch.multiprocessing import Process, Lock, Manager
+from vgg import matched_vgg11
 
 args_datadir = "./data/cifar10"
 
@@ -401,7 +402,7 @@ def local_retrain(local_datasets, weights, args, mode="bottom-up", freezing_inde
                                     output_dim=output_dim)
     elif args.model == "vgg":
         matched_shapes = [w.shape for w in weights]
-        matched_cnn = matched_vgg11(matched_shapes=matched_shapes)
+        matched_cnn = matched_vgg11(matched_shapes=matched_shapes) ## check for  correctness
     elif args.model == "simple-cnn":
         # input_channel, num_filters, kernel_size, input_dim, hidden_dims, output_dim=10):
         # [(9, 75), (9,), (19, 225), (19,), (475, 123), (123,), (123, 87), (87,), (87, 10), (10,)]
@@ -864,7 +865,7 @@ def local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu"):
         new_state_dict.update(temp_dict)
     matched_cnn.load_state_dict(new_state_dict)
 
-    matched_cnn = common_retrain(args, matched_cnn, local_datasets, device)
+    matched_cnn = common_retrain(args, matched_cnn, local_datasets, device, global_weight_collector=global_weight_collector)
     return matched_cnn
 
     # matched_cnn.to(device).train()
@@ -1071,7 +1072,7 @@ def reconstruct_local_net(weights, args, ori_assignments=None, worker_index=0):
     return reconstructed_weights
 
 
-def common_retrain(args, matched_cnn, local_datasets, device="cpu", mode=None, freezing_index=0, weights=[0]):
+def common_retrain(args, matched_cnn, local_datasets, device="cpu", mode=None, freezing_index=0, weights=[0], global_weight_collector=None):
     matched_cnn.to(device).train()
     # start training last fc layers:
     train_dl_local = local_datasets[0]
@@ -1091,14 +1092,14 @@ def common_retrain(args, matched_cnn, local_datasets, device="cpu", mode=None, f
     
     criterion_fine_tune = nn.CrossEntropyLoss().to(device)
 
-    logger.info('n_training: %d' % len(train_dl_local))
-    logger.info('n_test: %d' % len(test_dl_local))
+    # logger.info('n_training: %d' % len(train_dl_local))
+    # logger.info('n_test: %d' % len(test_dl_local))
 
-    train_acc = compute_accuracy(matched_cnn, train_dl_local, device=device)
-    test_acc, conf_matrix = compute_accuracy(matched_cnn, test_dl_local, get_confusion_matrix=True, device=device)
+    # train_acc = compute_accuracy(matched_cnn, train_dl_local, device=device)
+    # test_acc, conf_matrix = compute_accuracy(matched_cnn, test_dl_local, get_confusion_matrix=True, device=device)
 
-    logger.info('>> Pre-Training Training accuracy: %f' % train_acc)
-    logger.info('>> Pre-Training Test accuracy: %f' % test_acc)
+    # logger.info('>> Pre-Training Training accuracy: %f' % train_acc)
+    # logger.info('>> Pre-Training Test accuracy: %f' % test_acc)
 
     for epoch in range(args.retrain_epochs):
         epoch_loss_collector = []
@@ -1127,7 +1128,7 @@ def common_retrain(args, matched_cnn, local_datasets, device="cpu", mode=None, f
 
         #logging.debug('Epoch: %d Loss: %f L2 loss: %f' % (epoch, loss.item(), reg*l2_reg))
         epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-        logger.info('Epoch: %d Epoch Avg Loss: %f' % (epoch, epoch_loss))
+        # logger.info('Epoch: %d Epoch Avg Loss: %f' % (epoch, epoch_loss))
 
     train_acc = compute_accuracy(matched_cnn, train_dl_local, device=device)
     test_acc, conf_matrix = compute_accuracy(matched_cnn, test_dl_local, get_confusion_matrix=True, device=device)

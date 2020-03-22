@@ -12,24 +12,25 @@
 # --oneshot_matching= \
 # --retrain= \
 # --rematching=
-
+  
 python main.py --model=moderate-cnn \
 --dataset=cifar10 \
 --lr=0.01 \
 --retrain_lr=0.01 \
 --batch-size=64 \
---epochs=1 \
---retrain_epochs=1 \
+--epochs=20 \
+--retrain_epochs=20 \
 --n_nets=16 \
 --partition=hetero-dir \
 --comm_type=fedavg \
---comm_round=3 \
+--comm_round=100 \
 --oneshot_matching= \
---rematching= \
 --retrain= \
---gpu=1 \
+--rematching= \
+--gpu=4,5,6,7 \
 --multiprocess=True \
---pretrained_model_dir=tmp/checkpoints/search-try-20200225-100828/
+--pretrained_model_dir=tmp/checkpoints/search-try-20200311-171453/
+# --pretrained_model_dir=tmp/checkpoints/search-try-20200316-110132
 
 # python main.py --model=moderate-cnn \
 # --dataset=femnist \

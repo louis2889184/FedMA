@@ -14,8 +14,13 @@ from matching.pfnm import block_patching, patch_weights
 from matching_performance import compute_full_cnn_accuracy
 from local_train_functions import local_retrain, local_retrain_fedavg, local_retrain_fedprox, local_retrain_dummy, reconstruct_local_net
 
-args_datadir = "./data/cifar10"
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import maximum_flow, shortest_path
+import numpy as np
+from collections import defaultdict
 
+args_datadir = "./data/cifar10"
+# torch.multiprocessing.set_sharing_strategy('file_system')
 
 def oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map, 
                             averaging_weights, args, 
@@ -338,7 +343,7 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
 """ for multiprocessing """
 def get_retrained_fed_net(args, worker_index, dataidxs, tmp_weight, device, d, lock, assignments_list=None):
     train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
-    if args.comm_type=='fedavg':
+    if args.comm_type=='fedavg' or args.comm_type=='fedmf':
         retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), tmp_weight, args, device=device)
     elif args.comm_type=='fedprox':
         retrained_cnn = local_retrain_fedprox((train_dl_local,test_dl_local), tmp_weight, args, device=device)
@@ -407,6 +412,96 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
             logger.info("After retraining and rematching for comm. round: {}, we measure the accuracy ...".format(cr))
             averaged_weights = hungarian_weights
 
+        elif args.comm_type=='fedmf':
+            batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
+            total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
+            fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
+            averaged_weights = []
+
+            num_layers = len(batch_weights[0])
+            num_workers = len(batch_weights)
+
+            for layer in range(num_layers):
+                
+                num_kernels = batch_weights[0][layer].shape[0] # dimension: (c_out, c_in, k, k)
+                if layer<=10 and layer%2==0:
+                    # t0 = time.time()
+                    capacity_matrix = [[0 for k in range(2*num_workers*num_kernels+2)] for m in range(2*num_workers*num_kernels+2)] # +2 for source and sink
+                    order_list = [i for i in range(num_workers)]
+                    group_list = [(order_list[i], order_list[i+1]) for i in range(len(order_list)-1)]
+                    for worker in order_list:
+                        for kernel in range(num_kernels):
+                            capacity_matrix[num_kernels*worker*2+kernel][num_kernels*(worker*2+1)+kernel]=1
+
+
+                    for (worker1, worker2) in group_list:
+                    # for worker1 in range(num_workers):
+                    #     for worker2 in range(0, worker1):
+                        worker1_end = worker1*2+1
+                        worker2_start = worker2*2
+                        for kernel1 in range(num_kernels):
+                            for kernel2 in range(num_kernels):
+                                capacity_matrix[num_kernels*worker1_end+kernel1][num_kernels*worker2_start+kernel2]=\
+                                is_match(batch_weights[worker1][layer][kernel1], batch_weights[worker2][layer][kernel2])
+                                # capacity_matrix[num_kernels*worker2+kernel2][num_kernels*worker1+kernel1]=\
+                    
+                    # t1 = time.time()
+                    first_worker = order_list[0]*2
+                    last_worker = order_list[-1]*2+1
+                    source = 2*num_workers*num_kernels
+                    sink = 2*num_workers*num_kernels+1
+                    for kernel in range(num_kernels):
+                        capacity_matrix[source][num_kernels*first_worker+kernel]=1 # source to first worker
+                        capacity_matrix[num_kernels*last_worker+kernel][sink]=1 # last worker to sink
+                    
+                    # t2 = time.time()
+                    capacity_graph = csr_matrix(capacity_matrix)
+                    flow = maximum_flow(capacity_graph, source, sink)
+                    residual_graph = flow.residual.toarray()
+                    value = flow.flow_value
+                    print("round : {}, layer : {}, maximum_match : {}, ratio : {}".format(cr, layer, value, value/num_kernels))
+                    # dist_matrix, predecessors = shortest_path(csgraph=capacity_graph, directed=False, indices=0, return_predecessors=True)
+                    
+                    # TODO: check for validity
+                    
+                    # t3 = time.time()
+                    kernel_order = [i for i in range(num_kernels)]
+                    kernel_order = sorted(kernel_order, key=lambda x: -residual_graph[source][num_kernels*first_worker+x])
+                    batch_weights[first_worker][layer] = np.concatenate([batch_weights[first_worker][layer][k:k+1] for k in kernel_order])
+                    for (worker1, worker2) in group_list:
+                        worker1_end = worker1*2+1
+                        worker2_start = worker2*2
+
+                        partial_graph = residual_graph[num_kernels*worker1_end:num_kernels*(worker1_end+1), num_kernels*worker2_start:num_kernels*(worker2_start+1)]
+                        matching_dict = defaultdict(lambda:-1)
+                        new_kernel_order = []
+                        check_for_no_matching=False
+                        for kernel in kernel_order:
+                            if check_for_no_matching:
+                                assert(np.max(partial_graph[kernel])==0) # check for no other matching
+                            else:
+                                if np.max(partial_graph[kernel])==1:
+                                    matching_dict[np.argmax(partial_graph[kernel])] = kernel
+                                    new_kernel_order.append(np.argmax(partial_graph[kernel]))
+                                else:
+                                    check_for_no_matching=True
+                        for kernel in range(num_kernels):
+                            if matching_dict[kernel]==-1:
+                                new_kernel_order.append(kernel)
+                        
+                        # print(new_kernel_order)
+                        # print(num_kernels)
+                        assert len(new_kernel_order)==num_kernels
+                        kernel_order = new_kernel_order
+                        batch_weights[worker2][layer] = np.concatenate([batch_weights[worker2][layer][k:k+1] for k in kernel_order])
+                    # t4 = time.time()
+
+                avegerated_weight = sum([b[layer] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
+                averaged_weights.append(avegerated_weight)
+                # print("{:.3f}, {:.3f}, {:.3f}, {:.3f}".format(t1-t0, t2-t1, t3-t2, t4-t3))
+
+            
+
         else: # fedavg, fedprox
             batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
 
@@ -419,6 +514,8 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                 avegerated_weight = sum([b[i] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
                 averaged_weights.append(avegerated_weight)
 
+        # with open("averaged_weights_round_{}.pkl".format(cr), 'wb') as fo:
+        #     pickle.dump(averaged_weights, fo)
 
         _ = compute_full_cnn_accuracy(None,
                             averaged_weights,
@@ -430,6 +527,16 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
         batch_weights = [copy.deepcopy(averaged_weights) for _ in range(args.n_nets)]
         del averaged_weights
         del retrained_nets
+
+def l2_norm(a, b):
+    return np.mean((a-b)**2)
+
+def is_match(a, b):
+    return 1 if l2_norm(a,b)<0.1 else 0
+
+def similarity(a, b):
+    return max(100-l2_norm*100, 0)
+
 
 
 # def get_retrained_fedavg_net(args, worker_index, dataidxs, tmp_weight, device, d, lock):

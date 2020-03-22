@@ -6,6 +6,7 @@ import glob
 import os
 import shutil
 import random
+import pickle
 # from sklearn.preprocessing import normalize
 
 
@@ -221,27 +222,27 @@ if __name__ == "__main__":
     ### local training stage
     nets_list = local_train(nets, args, net_dataidx_map, device=device)
 
-    # ensemble part of experiments
-    logger.info("Computing Uniform ensemble accuracy")
-    uens_train_acc, _ = compute_ensemble_accuracy(nets_list, train_dl_global, n_classes,  uniform_weights=True, device=device)
-    uens_test_acc, _ = compute_ensemble_accuracy(nets_list, test_dl_global, n_classes, uniform_weights=True, device=device)
+    # # ensemble part of experiments
+    # logger.info("Computing Uniform ensemble accuracy")
+    # uens_train_acc, _ = compute_ensemble_accuracy(nets_list, train_dl_global, n_classes,  uniform_weights=True, device=device)
+    # uens_test_acc, _ = compute_ensemble_accuracy(nets_list, test_dl_global, n_classes, uniform_weights=True, device=device)
 
-    logger.info("Uniform ensemble (Train acc): {}".format(uens_train_acc))
-    logger.info("Uniform ensemble (Test acc): {}".format(uens_test_acc))
+    # logger.info("Uniform ensemble (Train acc): {}".format(uens_train_acc))
+    # logger.info("Uniform ensemble (Test acc): {}".format(uens_test_acc))
 
-    # for PFNM
-    if args.oneshot_matching:
-        hungarian_weights, assignments_list = oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map, averaging_weights, args, device=device)
-        _ = compute_full_cnn_accuracy(hungarian_weights,
-                                   hungarian_weights,
-                                   train_dl_global,
-                                   test_dl_global,
-                                   n_classes,
-                                   device=device,
-                                   args=args)
+    # # for PFNM
+    # if args.oneshot_matching:
+    #     hungarian_weights, assignments_list = oneshot_matching(nets_list, model_meta_data, layer_type, net_dataidx_map, averaging_weights, args, device=device)
+    #     _ = compute_full_cnn_accuracy(hungarian_weights,
+    #                                hungarian_weights,
+    #                                train_dl_global,
+    #                                test_dl_global,
+    #                                n_classes,
+    #                                device=device,
+    #                                args=args)
 
-    # this is for PFNM
-    hungarian_weights, assignments_list = BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map, averaging_weights, args, device=device)
+    # # this is for PFNM
+    # hungarian_weights, assignments_list = BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map, averaging_weights, args, device=device)
 
     ## averaging models 
     ## we need to switch to real FedAvg implementation 
@@ -262,6 +263,19 @@ if __name__ == "__main__":
     for aw in averaged_weights:
         logger.info(aw.shape)
 
+    # with open("hungarian_weights.pkl", 'wb') as fo:
+    #     pickle.dump(hungarian_weights, fo)
+    # with open("averaged_weights.pkl", 'wb') as fo:
+    #     pickle.dump(averaged_weights, fo)
+    # with open("assignments_list.pkl", 'wb') as fo:
+    #     pickle.dump(assignments_list, fo)
+
+    with open("hungarian_weights.pkl", "rb") as fi:
+        hungarian_weights = pickle.load(fi)
+    with open("averaged_weights.pkl", 'rb') as fi:
+        averaged_weights = pickle.load(fi)
+    with open("assignments_list.pkl", 'rb') as fi:
+        assignments_list = pickle.load(fi)
     
     # print(args)
 
@@ -269,7 +283,6 @@ if __name__ == "__main__":
     _ = compute_full_cnn_accuracy(models, hungarian_weights, train_dl_global, test_dl_global, n_classes, device, args)
 
     _ = compute_model_averaging_accuracy(models, averaged_weights, train_dl_global, test_dl_global, n_classes, args)
-    
 
     if args.comm_type=="fedma":
         comm_init_batch_weights = [copy.deepcopy(hungarian_weights) for _ in range(args.n_nets)]
