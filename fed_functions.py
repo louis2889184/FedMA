@@ -343,7 +343,7 @@ def BBP_MAP(nets_list, model_meta_data, layer_type, net_dataidx_map,
 """ for multiprocessing """
 def get_retrained_fed_net(args, worker_index, dataidxs, tmp_weight, device, d, lock, assignments_list=None):
     train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
-    if args.comm_type=='fedavg' or args.comm_type=='fedmf':
+    if args.comm_type=='fedavg' or 'fedmf' in args.comm_type:
         retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), tmp_weight, args, device=device)
     elif args.comm_type=='fedprox':
         retrained_cnn = local_retrain_fedprox((train_dl_local,test_dl_local), tmp_weight, args, device=device)
@@ -412,62 +412,90 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
             logger.info("After retraining and rematching for comm. round: {}, we measure the accuracy ...".format(cr))
             averaged_weights = hungarian_weights
 
-        elif args.comm_type=='fedmf':
+        elif args.comm_type=='fedmf': # maximum flow 0/1
             batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
             total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
             fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
             averaged_weights = []
-
+            previous_kernel_order = defaultdict(list) # keep kernel order with each worker, worker index --> kernel order list
             num_layers = len(batch_weights[0])
             num_workers = len(batch_weights)
+            thres = [0.1, 0.1, 0.05, 0.05, 0.05, 0.05]
 
-            for layer in range(num_layers):
-                
-                num_kernels = batch_weights[0][layer].shape[0] # dimension: (c_out, c_in, k, k)
-                if layer<=10 and layer%2==0:
+            for layer_idx in range(num_layers):
+                if layer_idx<=10 and layer_idx%2==0:
                     # t0 = time.time()
+                    num_kernels = batch_weights[0][layer_idx].shape[0] # dimension: (c_out, c_in*k*k)
                     capacity_matrix = [[0 for k in range(2*num_workers*num_kernels+2)] for m in range(2*num_workers*num_kernels+2)] # +2 for source and sink
                     order_list = [i for i in range(num_workers)]
                     group_list = [(order_list[i], order_list[i+1]) for i in range(len(order_list)-1)]
+                    
+                    ''' implementation of node capacity == nodes split and connect with one edge '''
+                    ''' guarantee one flow in and one flow out '''
                     for worker in order_list:
-                        for kernel in range(num_kernels):
-                            capacity_matrix[num_kernels*worker*2+kernel][num_kernels*(worker*2+1)+kernel]=1
+                        for kernel_idx in range(num_kernels):
+                            capacity_matrix[num_kernels*worker*2+kernel_idx][num_kernels*(worker*2+1)+kernel_idx]=1
 
 
+                    ''' permutate kernel dimension with previous order '''
+                    if layer_idx != 0:
+                        for worker_idx in range(num_workers):
+                            fix_kernel_list = []
+                            for kernel_idx in range(num_kernels):
+                                orig_kernel = batch_weights[worker_idx][layer_idx][kernel_idx]
+                                orig_kernel = orig_kernel.reshape(orig_kernel.shape[0]//9, 3, 3)
+                                fix_kernel = np.concatenate([orig_kernel[k:k+1] for k in previous_kernel_order[worker_idx]])
+                                fix_kernel = fix_kernel.reshape(1, orig_kernel.shape[0]*9)
+                                fix_kernel_list.append(fix_kernel)
+                            batch_weights[worker_idx][layer_idx] = np.concatenate(fix_kernel_list)
+
+
+                    ''' decide which two kernels can be connected '''
+                    connections = 0
+                    value_count = [0, 0, 0, 0, 0, 0, 0]
                     for (worker1, worker2) in group_list:
                     # for worker1 in range(num_workers):
                     #     for worker2 in range(0, worker1):
                         worker1_end = worker1*2+1
                         worker2_start = worker2*2
-                        for kernel1 in range(num_kernels):
-                            for kernel2 in range(num_kernels):
-                                capacity_matrix[num_kernels*worker1_end+kernel1][num_kernels*worker2_start+kernel2]=\
-                                is_match(batch_weights[worker1][layer][kernel1], batch_weights[worker2][layer][kernel2])
-                                # capacity_matrix[num_kernels*worker2+kernel2][num_kernels*worker1+kernel1]=\
+                        for kernel1_idx in range(num_kernels):
+                            for kernel2_idx in range(num_kernels):
+                                distance = l2_norm(batch_weights[worker1][layer_idx][kernel1_idx], batch_weights[worker2][layer_idx][kernel2_idx])
+                                # if is_match(batch_weights[worker1][layer_idx][kernel1_idx], batch_weights[worker2][layer_idx][kernel2_idx]):
+                                if distance < thres[layer_idx//2]:
+                                    capacity_matrix[num_kernels*worker1_end+kernel1_idx][num_kernels*worker2_start+kernel2_idx]=1
+                                    connections += 1
+                                for i in range(7):
+                                    if distance>1:
+                                        value_count[i]+=1
+                                        break
+                                    distance = distance*10
+                    logging.info(value_count)
                     
                     # t1 = time.time()
                     first_worker = order_list[0]*2
                     last_worker = order_list[-1]*2+1
                     source = 2*num_workers*num_kernels
                     sink = 2*num_workers*num_kernels+1
-                    for kernel in range(num_kernels):
-                        capacity_matrix[source][num_kernels*first_worker+kernel]=1 # source to first worker
-                        capacity_matrix[num_kernels*last_worker+kernel][sink]=1 # last worker to sink
+                    for kernel_idx in range(num_kernels):
+                        capacity_matrix[source][num_kernels*first_worker+kernel_idx]=1 # source to first worker
+                        capacity_matrix[num_kernels*last_worker+kernel_idx][sink]=1 # last worker to sink
                     
                     # t2 = time.time()
                     capacity_graph = csr_matrix(capacity_matrix)
                     flow = maximum_flow(capacity_graph, source, sink)
                     residual_graph = flow.residual.toarray()
                     value = flow.flow_value
-                    print("round : {}, layer : {}, maximum_match : {}, ratio : {}".format(cr, layer, value, value/num_kernels))
+                    logging.info("round: {}, layer: {}, connections: {}, maximum_match: {}, ratio: {}".format(cr, layer_idx, connections, value, value/num_kernels))
                     # dist_matrix, predecessors = shortest_path(csgraph=capacity_graph, directed=False, indices=0, return_predecessors=True)
                     
-                    # TODO: check for validity
-                    
                     # t3 = time.time()
+                    first_worker = order_list[0]*2
                     kernel_order = [i for i in range(num_kernels)]
                     kernel_order = sorted(kernel_order, key=lambda x: -residual_graph[source][num_kernels*first_worker+x])
-                    batch_weights[first_worker][layer] = np.concatenate([batch_weights[first_worker][layer][k:k+1] for k in kernel_order])
+                    batch_weights[first_worker][layer_idx] = np.concatenate([batch_weights[first_worker][layer_idx][k:k+1] for k in kernel_order])
+                    previous_kernel_order[order_list[0]] = kernel_order
+
                     for (worker1, worker2) in group_list:
                         worker1_end = worker1*2+1
                         worker2_start = worker2*2
@@ -476,31 +504,346 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                         matching_dict = defaultdict(lambda:-1)
                         new_kernel_order = []
                         check_for_no_matching=False
-                        for kernel in kernel_order:
+                        for kernel_idx in kernel_order:
                             if check_for_no_matching:
-                                assert(np.max(partial_graph[kernel])==0) # check for no other matching
+                                assert(np.max(partial_graph[kernel_idx])==0) # check for no other matching
                             else:
-                                if np.max(partial_graph[kernel])==1:
-                                    matching_dict[np.argmax(partial_graph[kernel])] = kernel
-                                    new_kernel_order.append(np.argmax(partial_graph[kernel]))
+                                if np.max(partial_graph[kernel_idx])==1:
+                                    matching_dict[np.argmax(partial_graph[kernel_idx])] = kernel_idx
+                                    new_kernel_order.append(np.argmax(partial_graph[kernel_idx]))
                                 else:
                                     check_for_no_matching=True
-                        for kernel in range(num_kernels):
-                            if matching_dict[kernel]==-1:
-                                new_kernel_order.append(kernel)
+                        for kernel_idx in range(num_kernels):
+                            if matching_dict[kernel_idx]==-1:
+                                new_kernel_order.append(kernel_idx)
                         
                         # print(new_kernel_order)
                         # print(num_kernels)
                         assert len(new_kernel_order)==num_kernels
                         kernel_order = new_kernel_order
-                        batch_weights[worker2][layer] = np.concatenate([batch_weights[worker2][layer][k:k+1] for k in kernel_order])
+                        batch_weights[worker2][layer_idx] = np.concatenate([batch_weights[worker2][layer_idx][k:k+1] for k in kernel_order])
+                        previous_kernel_order[worker2] = kernel_order
                     # t4 = time.time()
+                
+                elif layer_idx<=11 and layer_idx%2==1:
+                    ''' permutate bias according to previous order '''
+                    for worker_idx in range(num_workers):
+                        bias = batch_weights[worker_idx][layer_idx]
+                        batch_weights[worker_idx][layer_idx] = np.concatenate([bias[i:i+1] for i in previous_kernel_order[worker_idx]])
 
-                avegerated_weight = sum([b[layer] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
+                elif layer_idx==12: # first fc
+                    ''' permutate bias according to previous order '''
+                    for worker_idx in range(num_workers):
+                        fc = batch_weights[worker_idx][layer_idx]
+                        fc = fc.reshape(256, 16, 512)
+                        fc = np.concatenate([fc[i:i+1] for i in previous_kernel_order[worker_idx]])
+                        fc = fc.reshape(4096, 512)
+                        batch_weights[worker_idx][layer_idx] = fc
+
+                avegerated_weight = sum([b[layer_idx] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
                 averaged_weights.append(avegerated_weight)
                 # print("{:.3f}, {:.3f}, {:.3f}, {:.3f}".format(t1-t0, t2-t1, t3-t2, t4-t3))
 
-            
+        elif args.comm_type=='fedmfv2': # maximum flow
+            batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
+            total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
+            fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
+            averaged_weights = []
+            # previous_kernel_order = defaultdict(list) # keep kernel order with each worker, worker index --> kernel order list
+            num_layers = len(batch_weights[0])
+            num_workers = len(batch_weights)
+
+            for layer_idx in range(num_layers):
+                if layer_idx<=10 and layer_idx%2==0:
+                    # t0 = time.time()
+                    num_kernels = batch_weights[0][layer_idx].shape[0] # dimension: (c_out, c_in*k*k)
+                    capacity_matrix = [[0 for k in range(num_workers*num_kernels+2)] for m in range(num_workers*num_kernels+2)] # +2 for source and sink
+                    order_list = [i for i in range(num_workers)]
+                    group_list = [(order_list[i], order_list[i+1]) for i in range(len(order_list)-1)]
+
+
+                    ''' permutate kernel dimension with previous order '''
+                    if layer_idx != 0:
+                        for worker_idx in range(num_workers):
+                            fix_kernel_list = []
+                            for kernel_idx in range(num_kernels):
+                                orig_kernel = batch_weights[worker_idx][layer_idx][kernel_idx]
+                                orig_kernel = orig_kernel.reshape(orig_kernel.shape[0]//9, 3, 3)
+                                fix_kernel = np.concatenate([orig_kernel[k:k+1] for k in all_kernel_order[worker_idx]])
+                                fix_kernel = fix_kernel.reshape(1, orig_kernel.shape[0]*9)
+                                fix_kernel_list.append(fix_kernel)
+                            batch_weights[worker_idx][layer_idx] = np.concatenate(fix_kernel_list)
+
+
+                    ''' assign capacity '''
+                    connections = 0
+                    for (worker1, worker2) in group_list:
+                        for kernel1_idx in range(num_kernels):
+                            for kernel2_idx in range(num_kernels):
+                                capacity_matrix[num_kernels*worker1+kernel1_idx][num_kernels*worker2+kernel2_idx] =\
+                                similarity(batch_weights[worker1][layer_idx][kernel1_idx], batch_weights[worker2][layer_idx][kernel2_idx])
+                    
+                    # t1 = time.time()
+                    first_worker = order_list[0]
+                    last_worker = order_list[-1]
+                    source = num_workers*num_kernels
+                    sink = num_workers*num_kernels+1
+                    for kernel_idx in range(num_kernels):
+                        capacity_matrix[source][num_kernels*first_worker+kernel_idx]=9999 # source to first worker
+                        capacity_matrix[num_kernels*last_worker+kernel_idx][sink]=9999 # last worker to sink
+                    
+                    # t2 = time.time()
+                    all_kernel_order = [[] for i in range(num_workers)]
+
+                    def search_path(graph, previous_max_flow, source, sink, flow_value, global_max = 0):
+                        ''' trace dominate flow: dfs '''
+                        path_candidate = []
+                        for i in range(num_kernels*num_workers+2):
+                            if graph[source][i]>0 and flow_value>previous_max_flow[i] and flow_value>global_max:
+                                previous_max_flow[i] = flow_value
+                                current_flow_value = min(flow_value, graph[source][i])
+                                if i==sink:
+                                    path_candidate.append([[], current_flow_value])
+                                else:
+                                    res = search_path(graph, previous_max_flow, i, sink, current_flow_value, global_max)
+                                    if res is None:
+                                        continue
+                                    res[0].append(i)
+                                    if len(path_candidate)==0 or res[1]>path_candidate[0][1]:
+                                        path_candidate = [[res[0], res[1]]]
+                                        global_max = res[1]
+                                    # path_candidate.append([res[0], res[1]])
+                                    previous_max_flow = res[2]
+                        
+                        if len(path_candidate)!=0:
+                            path_candidate = sorted(path_candidate, key=lambda x: x[1])
+                            return path_candidate[-1][0], path_candidate[-1][1], previous_max_flow
+                        else:
+                            return None
+
+                    capacity_graph = csr_matrix(capacity_matrix)
+                    flow = maximum_flow(capacity_graph, source, sink)
+                    residual_graph = flow.residual.toarray()
+                    value = flow.flow_value
+                    logger.info("round: {}, layer: {}, flow_value: {}".format(cr, layer_idx, value))
+
+                    while value>0:
+                        t1 = time.time()
+                        previous_max_flow = defaultdict(lambda: -1)
+                        path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
+                        path = path[::-1]
+                        for wid, kid in enumerate(path):
+                            all_kernel_order[wid].append(kid%num_kernels)
+                            capacity_matrix[kid] = [0 for i in range(num_workers*num_kernels+2)]
+                        
+                        t2 = time.time()
+                        capacity_graph = csr_matrix(capacity_matrix)
+                        flow = maximum_flow(capacity_graph, source, sink)
+                        residual_graph = flow.residual.toarray()
+                        value = flow.flow_value
+                        t3 = time.time()
+                        logger.info("match: {}, dominate_flow: {}, time: {:.3f}, {:.3f}".format(path, dominate_flow, t2-t1, t3-t2))
+
+                    # previous_max_flow = defaultdict(lambda: -1)
+                    # path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
+                    # while dominate_flow>0:
+                    #     t1 = time.time()
+                        
+                    #     path = path[::-1]
+                    #     for wid, kid in enumerate(path):
+                    #         all_kernel_order[wid].append(kid%num_kernels)
+                    #         residual_graph[kid] = 0
+                        
+                    #     t2 = time.time()
+
+                    #     previous_max_flow = defaultdict(lambda: -1)
+                    #     path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
+
+                    #     t3 = time.time()
+                    #     logger.info("match: {}, dominate_flow: {}, time: {:.3f}, {:.3f}".format(path, dominate_flow, t2-t1, t3-t2))
+
+                    # t3 = time.time()
+
+                    for worker_idx in order_list:
+                        for kernel_idx in range(num_kernels):
+                            if kernel_idx not in all_kernel_order[worker_idx]:
+                                all_kernel_order[worker_idx].append(kernel_idx)
+                        assert len(all_kernel_order[worker_idx])==num_kernels
+                        batch_weights[worker_idx][layer_idx] = np.concatenate([batch_weights[worker_idx][layer_idx][k:k+1] for k in all_kernel_order[worker_idx]])
+
+                    # t4 = time.time()
+
+                elif layer_idx<=11 and layer_idx%2==1:
+                    ''' permutate bias according to previous order '''
+                    for worker_idx in range(num_workers):
+                        bias = batch_weights[worker_idx][layer_idx]
+                        batch_weights[worker_idx][layer_idx] = np.concatenate([bias[i:i+1] for i in all_kernel_order[worker_idx]])
+
+                elif layer_idx==12: # first fc
+                    ''' permutate bias according to previous order '''
+                    for worker_idx in range(num_workers):
+                        fc = batch_weights[worker_idx][layer_idx]
+                        fc = fc.reshape(256, 16, 512)
+                        fc = np.concatenate([fc[i:i+1] for i in all_kernel_order[worker_idx]])
+                        fc = fc.reshape(4096, 512)
+                        batch_weights[worker_idx][layer_idx] = fc
+
+                
+                avegerated_weight = sum([b[layer_idx] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
+                averaged_weights.append(avegerated_weight)
+                # print("{:.3f}, {:.3f}, {:.3f}, {:.3f}".format(t1-t0, t2-t1, t3-t2, t4-t3))
+
+        elif args.comm_type=='fedmfv3': # maximum flow
+            batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
+            total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
+            fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
+            averaged_weights = []
+            # previous_kernel_order = defaultdict(list) # keep kernel order with each worker, worker index --> kernel order list
+            num_layers = len(batch_weights[0])
+            num_workers = len(batch_weights)
+
+            for layer_idx in range(num_layers):
+                if layer_idx<=10 and layer_idx%2==0:
+                    # t0 = time.time()
+                    num_kernels = batch_weights[0][layer_idx].shape[0] # dimension: (c_out, c_in*k*k)
+                    capacity_matrix = [[0 for k in range(num_workers*num_kernels+2)] for m in range(num_workers*num_kernels+2)] # +2 for source and sink
+                    order_list = [i for i in range(num_workers)]
+                    group_list = [(order_list[i], order_list[i+1]) for i in range(len(order_list)-1)]
+
+
+                    ''' permutate kernel dimension with previous order '''
+                    if layer_idx != 0:
+                        for worker_idx in range(num_workers):
+                            fix_kernel_list = []
+                            for kernel_idx in range(num_kernels):
+                                orig_kernel = batch_weights[worker_idx][layer_idx][kernel_idx]
+                                orig_kernel = orig_kernel.reshape(orig_kernel.shape[0]//9, 3, 3)
+                                fix_kernel = np.concatenate([orig_kernel[k:k+1] for k in all_kernel_order[worker_idx]])
+                                fix_kernel = fix_kernel.reshape(1, orig_kernel.shape[0]*9)
+                                fix_kernel_list.append(fix_kernel)
+                            batch_weights[worker_idx][layer_idx] = np.concatenate(fix_kernel_list)
+
+
+                    ''' assign capacity '''
+                    connections = 0
+                    for (worker1, worker2) in group_list:
+                        for kernel1_idx in range(num_kernels):
+                            for kernel2_idx in range(num_kernels):
+                                capacity_matrix[num_kernels*worker1+kernel1_idx][num_kernels*worker2+kernel2_idx] =\
+                                similarity(batch_weights[worker1][layer_idx][kernel1_idx], batch_weights[worker2][layer_idx][kernel2_idx])
+                    
+                    # t1 = time.time()
+                    first_worker = order_list[0]
+                    last_worker = order_list[-1]
+                    source = num_workers*num_kernels
+                    sink = num_workers*num_kernels+1
+                    for kernel_idx in range(num_kernels):
+                        # capacity_matrix[source][num_kernels*first_worker+kernel_idx]=9999 # source to first worker
+                        capacity_matrix[num_kernels*last_worker+kernel_idx][sink]=9999 # last worker to sink
+                    
+                    # t2 = time.time()
+                    all_kernel_order = [[] for i in range(num_workers)]
+
+                    def search_path(graph, previous_max_flow, source, sink, flow_value, global_max = 0):
+                        ''' trace dominate flow: dfs '''
+                        path_candidate = []
+                        for i in range(num_kernels*num_workers+2):
+                            if graph[source][i]>0 and flow_value>previous_max_flow[i] and flow_value>global_max:
+                                previous_max_flow[i] = flow_value
+                                current_flow_value = min(flow_value, graph[source][i])
+                                if i==sink:
+                                    path_candidate.append([[], current_flow_value])
+                                else:
+                                    res = search_path(graph, previous_max_flow, i, sink, current_flow_value, global_max)
+                                    if res[1]==0:
+                                        continue
+                                    res[0].append(i)
+                                    if len(path_candidate)==0 or res[1]>path_candidate[0][1]:
+                                        path_candidate = [[res[0], res[1]]]
+                                        global_max = res[1]
+                                    # path_candidate.append([res[0], res[1]])
+                                    previous_max_flow = res[2]
+                        
+                        if len(path_candidate)!=0:
+                            path_candidate = sorted(path_candidate, key=lambda x: x[1])
+                            return path_candidate[-1][0], path_candidate[-1][1], previous_max_flow
+                        else:
+                            return None, 0, None
+
+                    # capacity_graph = csr_matrix(capacity_matrix)
+                    # flow = maximum_flow(capacity_graph, source, sink)
+                    # residual_graph = flow.residual.toarray()
+                    # value = flow.flow_value
+                    logger.info("round: {}, layer: {}".format(cr, layer_idx))
+
+                    capacity_matrix = np.array(capacity_matrix)
+                    for kernel_idx in range(num_kernels):
+                        capacity_matrix[source][num_kernels*first_worker+kernel_idx]=9999 # source to first worker
+                        t1 = time.time()
+                        previous_max_flow = defaultdict(lambda: -1)
+                        path, dominate_flow, previous_max_flow = search_path(capacity_matrix, previous_max_flow, source, sink, 999)
+                        if dominate_flow>0:
+                            path = path[::-1]
+                            for wid, kid in enumerate(path):
+                                all_kernel_order[wid].append(kid%num_kernels)
+                                capacity_matrix[kid] = 0
+                        
+                            t2 = time.time()
+                            # capacity_graph = csr_matrix(capacity_matrix)
+                            # flow = maximum_flow(capacity_graph, source, sink)
+                            # residual_graph = flow.residual.toarray()
+                            # value = flow.flow_value
+                            # t3 = time.time()
+                            logger.info("match: {}, dominate_flow: {}, time: {:.3f}".format(path, dominate_flow, t2-t1))
+
+                    # previous_max_flow = defaultdict(lambda: -1)
+                    # path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
+                    # while dominate_flow>0:
+                    #     t1 = time.time()
+                        
+                    #     path = path[::-1]
+                    #     for wid, kid in enumerate(path):
+                    #         all_kernel_order[wid].append(kid%num_kernels)
+                    #         residual_graph[kid] = 0
+                        
+                    #     t2 = time.time()
+
+                    #     previous_max_flow = defaultdict(lambda: -1)
+                    #     path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
+
+                    #     t3 = time.time()
+                    #     logger.info("match: {}, dominate_flow: {}, time: {:.3f}, {:.3f}".format(path, dominate_flow, t2-t1, t3-t2))
+
+                    # t3 = time.time()
+
+                    for worker_idx in order_list:
+                        for kernel_idx in range(num_kernels):
+                            if kernel_idx not in all_kernel_order[worker_idx]:
+                                all_kernel_order[worker_idx].append(kernel_idx)
+                        assert len(all_kernel_order[worker_idx])==num_kernels
+                        batch_weights[worker_idx][layer_idx] = np.concatenate([batch_weights[worker_idx][layer_idx][k:k+1] for k in all_kernel_order[worker_idx]])
+
+                    # t4 = time.time()
+
+                elif layer_idx<=11 and layer_idx%2==1:
+                    ''' permutate bias according to previous order '''
+                    for worker_idx in range(num_workers):
+                        bias = batch_weights[worker_idx][layer_idx]
+                        batch_weights[worker_idx][layer_idx] = np.concatenate([bias[i:i+1] for i in all_kernel_order[worker_idx]])
+
+                elif layer_idx==12: # first fc
+                    ''' permutate bias according to previous order '''
+                    for worker_idx in range(num_workers):
+                        fc = batch_weights[worker_idx][layer_idx]
+                        fc = fc.reshape(256, 16, 512)
+                        fc = np.concatenate([fc[i:i+1] for i in all_kernel_order[worker_idx]])
+                        fc = fc.reshape(4096, 512)
+                        batch_weights[worker_idx][layer_idx] = fc
+
+                
+                avegerated_weight = sum([b[layer_idx] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
+                averaged_weights.append(avegerated_weight)
+                # print("{:.3f}, {:.3f}, {:.3f}, {:.3f}".format(t1-t0, t2-t1, t3-t2, t4-t3))
 
         else: # fedavg, fedprox
             batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
@@ -529,13 +872,13 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
         del retrained_nets
 
 def l2_norm(a, b):
-    return np.mean((a-b)**2)
+    return np.mean((a-b)**2)**0.5
 
-def is_match(a, b):
-    return 1 if l2_norm(a,b)<0.1 else 0
+def is_match(a, b, thres=0.1):
+    return True if l2_norm(a,b)<thres else False
 
 def similarity(a, b):
-    return max(100-l2_norm*100, 0)
+    return max(int(1000-l2_norm(a,b)*10000), 0)
 
 
 

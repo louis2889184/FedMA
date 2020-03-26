@@ -17,7 +17,7 @@ from sklearn.metrics import confusion_matrix
 
 # we've changed to a faster solver
 #from scipy.optimize import linear_sum_assignment
-import logging
+# import logging
 
 from torch.autograd import Variable
 import torch.nn.functional as F

@@ -96,7 +96,7 @@ class VGGContainer(nn.Module):
         super(VGGContainer, self).__init__()
         self.features = features
         # note: we hard coded here a bit by assuming we only have two hidden layers
-        self.classifier = nn.Sequential(
+        self.fc_layer = nn.Sequential(
             nn.Dropout(),
             nn.Linear(input_dim, hidden_dims[0]),
             nn.ReLU(True),
@@ -116,7 +116,7 @@ class VGGContainer(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = x.view(x.size(0), -1)
-        x = self.classifier(x)
+        x = self.fc_layer(x)
         return x
 
 
