@@ -1009,11 +1009,8 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
                                 std=[x/255.0 for x in [63.0, 62.1, 66.7]])
             transform_train = transforms.Compose([
                 transforms.ToTensor(),
-                ### multiprocessing not allow lambda function
-                # transforms.Lambda(lambda x: F.pad(
-                #                     Variable(x.unsqueeze(0), requires_grad=False),
-                #                     (4,4,4,4),mode='reflect').data.squeeze()),
                 transforms.ToPILImage(),
+                transforms.Pad(4, padding_mode='reflect'),
                 transforms.RandomCrop(32),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
@@ -1037,8 +1034,8 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
         train_ds = dl_obj(datadir, dataidxs=dataidxs, train=True, transform=transform_train, download=True)
         test_ds = dl_obj(datadir, train=False, transform=transform_test, download=True)
 
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=2)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=2)
+        train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=1)
+        test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=1)
 
     elif dataset == 'cinic10':
         # statistic for normalizing the dataset
@@ -1124,8 +1121,8 @@ def get_dataloader_dist_skew(dataset, datadir, train_bs, test_bs, dataidxs=None,
                                                               transofrm_gray_scale=transform_test_gray_scale,
                                                               download=True)
 
-            train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=16)
-            test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=16)
+            train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=1)
+            test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False, num_workers=1)
 
     elif dataset == 'cinic10':
         pass

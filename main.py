@@ -270,19 +270,19 @@ if __name__ == "__main__":
     # with open("assignments_list.pkl", 'wb') as fo:
     #     pickle.dump(assignments_list, fo)
 
-    with open("hungarian_weights.pkl", "rb") as fi:
-        hungarian_weights = pickle.load(fi)
-    with open("averaged_weights.pkl", 'rb') as fi:
-        averaged_weights = pickle.load(fi)
-    with open("assignments_list.pkl", 'rb') as fi:
-        assignments_list = pickle.load(fi)
+    # with open("hungarian_weights.pkl", "rb") as fi:
+    #     hungarian_weights = pickle.load(fi)
+    # with open("averaged_weights.pkl", 'rb') as fi:
+    #     averaged_weights = pickle.load(fi)
+    # with open("assignments_list.pkl", 'rb') as fi:
+    #     assignments_list = pickle.load(fi)
     
     # print(args)
 
     models = nets_list
-    _ = compute_full_cnn_accuracy(models, hungarian_weights, train_dl_global, test_dl_global, n_classes, device, args)
+    # _ = compute_full_cnn_accuracy(models, hungarian_weights, train_dl_global, test_dl_global, n_classes, device, args)
 
-    _ = compute_model_averaging_accuracy(models, averaged_weights, train_dl_global, test_dl_global, n_classes, args)
+    # _ = compute_model_averaging_accuracy(models, averaged_weights, train_dl_global, test_dl_global, n_classes, args)
 
     if args.comm_type=="fedma":
         comm_init_batch_weights = [copy.deepcopy(hungarian_weights) for _ in range(args.n_nets)]
@@ -292,45 +292,3 @@ if __name__ == "__main__":
     
     fed_comm(comm_init_batch_weights, model_meta_data, layer_type, net_dataidx_map, averaging_weights, args,
              train_dl_global, test_dl_global, comm_round=args.comm_round, device=device, assignments_list=assignments_list)
-
-
-    # if args.comm_type == "fedavg":
-    #     ########################################################
-    #     # baseline: FedAvg: https://arxiv.org/pdf/1602.05629.pdf
-    #     ########################################################
-    #     # we turn to enable communication here:
-    #     comm_init_batch_weights = [copy.deepcopy(averaged_weights) for _ in range(args.n_nets)]
-
-    #     fedavg_comm(comm_init_batch_weights, model_meta_data, layer_type, 
-    #                         net_dataidx_map, 
-    #                         averaging_weights, args,
-    #                         train_dl_global,
-    #                         test_dl_global,
-    #                         comm_round=args.comm_round,
-    #                         device=device)
-    # elif args.comm_type == "fedprox":
-    #     ##########################################################
-    #     # baseline: FedProx: https://arxiv.org/pdf/1812.06127.pdf
-    #     ##########################################################
-
-    #     # we turn to enable communication here:
-    #     comm_init_batch_weights = [copy.deepcopy(averaged_weights) for _ in range(args.n_nets)]
-
-    #     fedprox_comm(comm_init_batch_weights, model_meta_data, layer_type, 
-    #                         net_dataidx_map, 
-    #                         averaging_weights, args,
-    #                         train_dl_global,
-    #                         test_dl_global,
-    #                         comm_round=args.comm_round,
-    #                         device=device)
-    # elif args.comm_type == "fedma":
-    #     comm_init_batch_weights = [copy.deepcopy(hungarian_weights) for _ in range(args.n_nets)]
-
-    #     fedma_comm(comm_init_batch_weights,
-    #                              model_meta_data, layer_type, net_dataidx_map,
-    #                              averaging_weights, args,
-    #                              train_dl_global,
-    #                              test_dl_global,
-    #                              assignments_list,
-    #                              comm_round=args.comm_round,
-    #                              device=device)

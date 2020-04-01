@@ -751,52 +751,6 @@ def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
 
     matched_cnn = common_retrain(args, matched_cnn, local_datasets, device)
     return matched_cnn
-    # matched_cnn.to(device).train()
-    # # start training last fc layers:
-    # train_dl_local = local_datasets[0]
-    # test_dl_local = local_datasets[1]
-
-    # optimizer_fine_tune = optim.Adam(filter(lambda p: p.requires_grad, matched_cnn.parameters()), lr=0.001, weight_decay=0.0001, amsgrad=True)
-    
-    # criterion_fine_tune = nn.CrossEntropyLoss().to(device)
-
-    # logger.info('n_training: %d' % len(train_dl_local))
-    # logger.info('n_test: %d' % len(test_dl_local))
-
-    # train_acc = compute_accuracy(matched_cnn, train_dl_local, device=device)
-    # test_acc, conf_matrix = compute_accuracy(matched_cnn, test_dl_local, get_confusion_matrix=True, device=device)
-
-    # logger.info('>> Pre-Training Training accuracy: %f' % train_acc)
-    # logger.info('>> Pre-Training Test accuracy: %f' % test_acc)
-
-
-    # for epoch in range(args.retrain_epochs):
-    #     epoch_loss_collector = []
-    #     for batch_idx, (x, target) in enumerate(train_dl_local):
-    #         x, target = x.to(device), target.to(device)
-
-    #         optimizer_fine_tune.zero_grad()
-    #         x.requires_grad = True
-    #         target.requires_grad = False
-    #         target = target.long()
-
-    #         out = matched_cnn(x)
-    #         loss = criterion_fine_tune(out, target)
-    #         epoch_loss_collector.append(loss.item())
-
-    #         loss.backward()
-    #         optimizer_fine_tune.step()
-
-    #     #logging.debug('Epoch: %d Loss: %f L2 loss: %f' % (epoch, loss.item(), reg*l2_reg))
-    #     epoch_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-    #     logger.info('Epoch: %d Epoch Avg Loss: %f' % (epoch, epoch_loss))
-
-    # train_acc = compute_accuracy(matched_cnn, train_dl_local, device=device)
-    # test_acc, conf_matrix = compute_accuracy(matched_cnn, test_dl_local, get_confusion_matrix=True, device=device)
-
-    # logger.info('>> Training accuracy after local retrain: %f' % train_acc)
-    # logger.info('>> Test accuracy after local retrain: %f' % test_acc)
-    # return matched_cnn
 
 
 def local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu"):

@@ -363,6 +363,11 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
     logging.info("=="*15)
 
     for cr in range(comm_round):
+
+        # if cr<10:
+        #     args.comm_type='fedavg'
+        # else:
+        #     args.comm_type='fedmfv3'
         
         logger.info("Communication round : {}".format(cr))
 
@@ -387,7 +392,11 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                     processes = []
             for p in processes:
                 p.join()
-            retrained_nets = [d[rank] for rank in d]
+            worker_list = [rank for rank in d]
+            print(worker_list)
+            worker_list = sorted(worker_list)
+            print(worker_list)
+            retrained_nets = [d[rank] for rank in worker_list]
 
         else:
             retrained_nets = []
@@ -396,7 +405,7 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                 train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
                 
                 # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
-                if args.comm_type=='fedavg':
+                if args.comm_type=='fedavg' or 'fedmf' in args.comm_type:
                     retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), batch_weights[worker_index], args, device=device)
                 elif args.comm_type=='fedprox':
                     retrained_cnn = local_retrain_fedprox((train_dl_local,test_dl_local), batch_weights[worker_index], mu=0.001, args=args, device=device)
@@ -420,7 +429,7 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
             previous_kernel_order = defaultdict(list) # keep kernel order with each worker, worker index --> kernel order list
             num_layers = len(batch_weights[0])
             num_workers = len(batch_weights)
-            thres = [0.1, 0.1, 0.05, 0.05, 0.05, 0.05]
+            thres = [0.1, 0.1, 0.1, 0.1, 0.05, 0.05]
 
             for layer_idx in range(num_layers):
                 if layer_idx<=10 and layer_idx%2==0:
@@ -543,8 +552,8 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                 avegerated_weight = sum([b[layer_idx] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
                 averaged_weights.append(avegerated_weight)
                 # print("{:.3f}, {:.3f}, {:.3f}, {:.3f}".format(t1-t0, t2-t1, t3-t2, t4-t3))
-
-        elif args.comm_type=='fedmfv2': # maximum flow
+        
+        elif args.comm_type=='fedmfv2': # deprecated
             batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
             total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
             fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
@@ -706,7 +715,7 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                 if layer_idx<=10 and layer_idx%2==0:
                     # t0 = time.time()
                     num_kernels = batch_weights[0][layer_idx].shape[0] # dimension: (c_out, c_in*k*k)
-                    capacity_matrix = [[0 for k in range(num_workers*num_kernels+2)] for m in range(num_workers*num_kernels+2)] # +2 for source and sink
+                    capacity_matrix_group = [[[0 for k in range(num_workers*num_kernels+2)] for m in range(num_workers*num_kernels+2)] for n in range(1000//50)] # +2 for source and sink
                     order_list = [i for i in range(num_workers)]
                     group_list = [(order_list[i], order_list[i+1]) for i in range(len(order_list)-1)]
 
@@ -729,8 +738,10 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                     for (worker1, worker2) in group_list:
                         for kernel1_idx in range(num_kernels):
                             for kernel2_idx in range(num_kernels):
-                                capacity_matrix[num_kernels*worker1+kernel1_idx][num_kernels*worker2+kernel2_idx] =\
-                                similarity(batch_weights[worker1][layer_idx][kernel1_idx], batch_weights[worker2][layer_idx][kernel2_idx])
+                                s = similarity(batch_weights[worker1][layer_idx][kernel1_idx], batch_weights[worker2][layer_idx][kernel2_idx])
+                                capacity_matrix_group[s//50][num_kernels*worker1+kernel1_idx][num_kernels*worker2+kernel2_idx] = s
+                                
+                    capacity_matrix_group = capacity_matrix_group[::-1]
                     
                     # t1 = time.time()
                     first_worker = order_list[0]
@@ -738,13 +749,13 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                     source = num_workers*num_kernels
                     sink = num_workers*num_kernels+1
                     for kernel_idx in range(num_kernels):
-                        # capacity_matrix[source][num_kernels*first_worker+kernel_idx]=9999 # source to first worker
-                        capacity_matrix[num_kernels*last_worker+kernel_idx][sink]=9999 # last worker to sink
+                        capacity_matrix_group[0][source][num_kernels*first_worker+kernel_idx]=9999 # source to first worker
+                        capacity_matrix_group[0][num_kernels*last_worker+kernel_idx][sink]=9999 # last worker to sink
                     
                     # t2 = time.time()
                     all_kernel_order = [[] for i in range(num_workers)]
 
-                    def search_path(graph, previous_max_flow, source, sink, flow_value, global_max = 0):
+                    def search_path(graph, previous_max_flow, source, sink, flow_value, global_max = 0, flow_range=None):
                         ''' trace dominate flow: dfs '''
                         path_candidate = []
                         for i in range(num_kernels*num_workers+2):
@@ -754,66 +765,65 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                                 if i==sink:
                                     path_candidate.append([[], current_flow_value])
                                 else:
-                                    res = search_path(graph, previous_max_flow, i, sink, current_flow_value, global_max)
-                                    if res[1]==0:
-                                        continue
-                                    res[0].append(i)
-                                    if len(path_candidate)==0 or res[1]>path_candidate[0][1]:
-                                        path_candidate = [[res[0], res[1]]]
-                                        global_max = res[1]
-                                    # path_candidate.append([res[0], res[1]])
-                                    previous_max_flow = res[2]
+                                    res = search_path(graph, previous_max_flow, i, sink, current_flow_value, global_max, flow_range)
+                                    if res[1]!=0:
+                                        res[0].append(i)
+                                        if len(path_candidate)==0 or res[1]>path_candidate[0][1]:
+                                            path_candidate = [[res[0], res[1]]]
+                                            global_max = res[1]
+                                        # path_candidate.append([res[0], res[1]])
+                                        previous_max_flow = res[2]
+                                        if flow_range is not None:
+                                            if global_max>flow_range[0]:
+                                                return path_candidate[-1][0], path_candidate[-1][1], previous_max_flow
                         
                         if len(path_candidate)!=0:
                             path_candidate = sorted(path_candidate, key=lambda x: x[1])
                             return path_candidate[-1][0], path_candidate[-1][1], previous_max_flow
                         else:
-                            return None, 0, None
+                            return [], 0, None
 
-                    # capacity_graph = csr_matrix(capacity_matrix)
-                    # flow = maximum_flow(capacity_graph, source, sink)
-                    # residual_graph = flow.residual.toarray()
-                    # value = flow.flow_value
-                    logger.info("round: {}, layer: {}".format(cr, layer_idx))
+                    for i in range(len(capacity_matrix_group)):
+                        capacity_matrix_group[i] = np.array(capacity_matrix_group[i])
 
-                    capacity_matrix = np.array(capacity_matrix)
-                    for kernel_idx in range(num_kernels):
-                        capacity_matrix[source][num_kernels*first_worker+kernel_idx]=9999 # source to first worker
-                        t1 = time.time()
-                        previous_max_flow = defaultdict(lambda: -1)
-                        path, dominate_flow, previous_max_flow = search_path(capacity_matrix, previous_max_flow, source, sink, 999)
-                        if dominate_flow>0:
-                            path = path[::-1]
-                            for wid, kid in enumerate(path):
-                                all_kernel_order[wid].append(kid%num_kernels)
-                                capacity_matrix[kid] = 0
+                    previous_capacity_matrix = None
+                    for cm_id, capacity_matrix in enumerate(capacity_matrix_group):
+                        # capacity_matrix = np.array(capacity_matrix)
+                        if previous_capacity_matrix is not None:
+                            capacity_matrix += previous_capacity_matrix
                         
-                            t2 = time.time()
-                            # capacity_graph = csr_matrix(capacity_matrix)
-                            # flow = maximum_flow(capacity_graph, source, sink)
-                            # residual_graph = flow.residual.toarray()
-                            # value = flow.flow_value
-                            # t3 = time.time()
-                            logger.info("match: {}, dominate_flow: {}, time: {:.3f}".format(path, dominate_flow, t2-t1))
-
-                    # previous_max_flow = defaultdict(lambda: -1)
-                    # path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
-                    # while dominate_flow>0:
-                    #     t1 = time.time()
+                        flag=False
+                        while True:
+                            capacity_graph = csr_matrix(capacity_matrix)
+                            flow = maximum_flow(capacity_graph, source, sink)
+                            residual_graph = flow.residual.toarray()
+                            value = flow.flow_value
+                            logger.info("round: {}, layer: {}, flow_value: {}".format(cr, layer_idx, value))
+                            if value==0 or flag:
+                                break
+                            # previous_max_flow = defaultdict(lambda: -1)
+                            # dominate_flow = 999
+                            
+                            flag = True
+                            while True:
+                                t1 = time.time()
+                                previous_max_flow = defaultdict(lambda: -1)
+                                path, dominate_flow, _ = search_path(residual_graph, previous_max_flow, source, sink, 999, 0, [950-50*cm_id, 1000-50*cm_id])
+                                if dominate_flow<=950-50*cm_id:#==0:
+                                    break
+                                flag = False
+                                path = path[::-1]
+                                for wid, kid in enumerate(path):
+                                    all_kernel_order[wid].append(kid%num_kernels)
+                                    residual_graph[kid] = 0
+                                    for i in range(len(capacity_matrix_group)):
+                                        capacity_matrix_group[i][kid] = 0
+                                t2 = time.time()
+                                # previous_max_flow = defaultdict(lambda: -1)
+                                path = [kid%num_kernels for kid in path]
+                                logger.info("match: {}, dominate_flow: {}, time: {:.3f}".format(path, dominate_flow, t2-t1))
                         
-                    #     path = path[::-1]
-                    #     for wid, kid in enumerate(path):
-                    #         all_kernel_order[wid].append(kid%num_kernels)
-                    #         residual_graph[kid] = 0
-                        
-                    #     t2 = time.time()
-
-                    #     previous_max_flow = defaultdict(lambda: -1)
-                    #     path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
-
-                    #     t3 = time.time()
-                    #     logger.info("match: {}, dominate_flow: {}, time: {:.3f}, {:.3f}".format(path, dominate_flow, t2-t1, t3-t2))
-
+                        previous_capacity_matrix = capacity_matrix
                     # t3 = time.time()
 
                     for worker_idx in order_list:
@@ -878,182 +888,4 @@ def is_match(a, b, thres=0.1):
     return True if l2_norm(a,b)<thres else False
 
 def similarity(a, b):
-    return max(int(1000-l2_norm(a,b)*10000), 0)
-
-
-
-# def get_retrained_fedavg_net(args, worker_index, dataidxs, tmp_weight, device, d, lock):
-#     train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
-#     retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), tmp_weight, args, device=device)
-#     with lock:
-#         d[worker_index]=retrained_cnn.cpu()
-
-
-
-# def fedavg_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
-#                             averaging_weights, args,
-#                             train_dl_global,
-#                             test_dl_global,
-#                             comm_round=2,
-#                             device="cpu"):
-
-#     logging.info("=="*15)
-#     logging.info("Weights shapes: {}".format([bw.shape for bw in batch_weights[0]]))
-
-#     for cr in range(comm_round):
-        
-#         logger.info("Communication round : {}".format(cr))
-
-#         if args.multiprocess:
-#             workers = random.sample(range(args.n_nets), args.clients_per_round)
-#             num_workers = args.clients_per_round
-
-#             device_list = ['cuda:%d'%(i%args.gpu_num) for i in range(num_workers)]
-#             mp.set_start_method('spawn', force=True)
-#             m = Manager()
-#             d = m.dict()
-#             lock = Lock()
-
-#             processes = []
-#             for rank in range(num_workers):
-#                 p = mp.Process(target=get_retrained_fedavg_net, args=(args, rank, net_dataidx_map[rank], batch_weights[rank], device_list[rank], d, lock))
-#                 p.start()
-#                 processes.append(p)
-#                 if len(processes)>=16: # restrict maximum processes
-#                     for p in processes:
-#                         p.join()
-#                     processes = []
-#             for p in processes:
-#                 p.join()
-#             retrained_nets = [d[rank] for rank in d]
-
-#         else:
-#             retrained_nets = []
-#             for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
-#                 dataidxs = net_dataidx_map[worker_index]
-#                 train_dl_local, test_dl_local = get_dataloader(args.dataset, args_datadir, args.batch_size, 512, dataidxs)
-                
-#                 # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
-#                 retrained_cnn = local_retrain_fedavg((train_dl_local,test_dl_local), batch_weights[worker_index], args, device=device)
-                
-#                 retrained_nets.append(retrained_cnn)
-
-#         batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
-
-#         total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
-#         fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
-#         averaged_weights = []
-#         num_layers = len(batch_weights[0])
-        
-#         for i in range(num_layers):
-#             avegerated_weight = sum([b[i] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
-#             averaged_weights.append(avegerated_weight)
-
-#         _ = compute_full_cnn_accuracy(None,
-#                             averaged_weights,
-#                             train_dl_global,
-#                             test_dl_global,
-#                             n_classes=None,
-#                             device=device,
-#                             args=args)
-#         batch_weights = [copy.deepcopy(averaged_weights) for _ in range(args.n_nets)]
-#         del averaged_weights
-
-# def fedprox_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
-#                             averaging_weights, args,
-#                             train_dl_global,
-#                             test_dl_global,
-#                             comm_round=2,
-#                             device="cpu"):
-
-#     logging.info("=="*15)
-#     logging.info("Weights shapes: {}".format([bw.shape for bw in batch_weights[0]]))
-
-#     for cr in range(comm_round):
-#         retrained_nets = []
-#         logger.info("Communication round : {}".format(cr))
-#         for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
-#             dataidxs = net_dataidx_map[worker_index]
-#             train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
-            
-#             # def local_retrain_fedavg(local_datasets, weights, args, device="cpu"):
-#             # local_retrain_fedprox(local_datasets, weights, mu, args, device="cpu")
-#             retrained_cnn = local_retrain_fedprox((train_dl_local,test_dl_local), batch_weights[worker_index], mu=0.001, args=args, device=device)
-            
-#             retrained_nets.append(retrained_cnn)
-#         batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
-
-#         total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
-#         fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
-#         averaged_weights = []
-#         num_layers = len(batch_weights[0])
-        
-#         for i in range(num_layers):
-#             avegerated_weight = sum([b[i] * fed_avg_freqs[j] for j, b in enumerate(batch_weights)])
-#             averaged_weights.append(avegerated_weight)
-
-#         _ = compute_full_cnn_accuracy(None,
-#                             averaged_weights,
-#                             train_dl_global,
-#                             test_dl_global,
-#                             n_classes=None,
-#                             device=device,
-#                             args=args)
-#         batch_weights = [copy.deepcopy(averaged_weights) for _ in range(args.n_nets)]
-#         del averaged_weights
-
-
-# def fedma_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map, 
-#                             averaging_weights, args, 
-#                             train_dl_global,
-#                             test_dl_global,
-#                             assignments_list,
-#                             comm_round=2,
-#                             device="cpu"):
-#     '''
-#     version 0.0.2
-#     In this version we achieve layerwise matching with communication in a blockwise style
-#     i.e. we unfreeze a block of layers (each 3 consecutive layers)---> retrain them ---> and rematch them
-#     '''
-#     n_layers = int(len(batch_weights[0]) / 2)
-#     num_workers = len(batch_weights)
-
-#     matching_shapes = []
-#     first_fc_index = None
-#     gamma = 5.0
-#     sigma = 1.0
-#     sigma0 = 1.0
-
-#     cls_freqs = traindata_cls_counts
-#     n_classes = args.n_class
-#     batch_freqs = pdm_prepare_freq(cls_freqs, n_classes)
-#     it=5
-
-#     for cr in range(comm_round):
-#         logger.info("Entering communication round: {} ...".format(cr))
-#         retrained_nets = []
-#         for worker_index in random.sample(range(args.n_nets), args.clients_per_round):
-#             dataidxs = net_dataidx_map[worker_index]
-#             train_dl_local, test_dl_local = get_dataloader(args.dataset, args.args_datadir, args.batch_size, 512, dataidxs)
-
-#             # for the "squeezing" mode, we pass assignment list wrt this worker to the `local_retrain` function
-#             recons_local_net = reconstruct_local_net(batch_weights[worker_index], args, ori_assignments=assignments_list, worker_index=worker_index)
-#             retrained_cnn = local_retrain((train_dl_local,test_dl_local), recons_local_net, args,
-#                                             mode="bottom-up", freezing_index=0, ori_assignments=None, device=device)
-#             retrained_nets.append(retrained_cnn)
-
-#         # BBP_MAP step
-#         hungarian_weights, assignments_list = BBP_MAP(retrained_nets, model_meta_data, layer_type, net_dataidx_map, averaging_weights, args, device=device)
-
-#         logger.info("After retraining and rematching for comm. round: {}, we measure the accuracy ...".format(cr))
-#         _ = compute_full_cnn_accuracy(None,
-#                                    hungarian_weights,
-#                                    train_dl_global,
-#                                    test_dl_global,
-#                                    n_classes=None,
-#                                    device=device,
-#                                    args=args) # first argument is useless
-#         batch_weights = [copy.deepcopy(hungarian_weights) for _ in range(args.n_nets)]
-#         del hungarian_weights
-#         del retrained_nets
-
+    return max(int(999-l2_norm(a,b)*10000), 0)
