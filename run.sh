@@ -27,9 +27,10 @@ python main.py --model=moderate-cnn \
 --oneshot_matching= \
 --retrain= \
 --rematching= \
---gpu=4,5,6,7 \
+--gpu=2,3,4,5 \
 --multiprocess=True \
---pretrained_model_dir=tmp/checkpoints/search-try-20200311-171453/
+--pretrained_model_dir=../../FedMA-orig/FedMA/
+# --pretrained_model_dir=tmp/checkpoints/search-try-20200311-171453/
 # --pretrained_model_dir=tmp/checkpoints/search-try-20200316-110132
 
 # python main.py --model=moderate-cnn \

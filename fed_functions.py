@@ -364,12 +364,15 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
 
     for cr in range(comm_round):
 
-        # if cr<10:
-        #     args.comm_type='fedavg'
-        # else:
-        #     args.comm_type='fedmfv3'
+        if cr<10:
+            args.comm_type='fedavg'
+            args.retrain_epochs=20
+        else:
+            args.comm_type='fedmfv3'
+            args.retrain_epochs=20
         
         logger.info("Communication round : {}".format(cr))
+        logger.info(args.comm_type)
 
         if args.multiprocess:
             workers = random.sample(range(args.n_nets), args.clients_per_round)
@@ -429,7 +432,7 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
             previous_kernel_order = defaultdict(list) # keep kernel order with each worker, worker index --> kernel order list
             num_layers = len(batch_weights[0])
             num_workers = len(batch_weights)
-            thres = [0.1, 0.1, 0.1, 0.1, 0.05, 0.05]
+            thres = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
 
             for layer_idx in range(num_layers):
                 if layer_idx<=10 and layer_idx%2==0:
@@ -553,7 +556,7 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                 averaged_weights.append(avegerated_weight)
                 # print("{:.3f}, {:.3f}, {:.3f}, {:.3f}".format(t1-t0, t2-t1, t3-t2, t4-t3))
         
-        elif args.comm_type=='fedmfv2': # deprecated
+        elif args.comm_type=='fedmfv2': # maximum flow sum
             batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
             total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
             fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
@@ -604,54 +607,65 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                     # t2 = time.time()
                     all_kernel_order = [[] for i in range(num_workers)]
 
-                    def search_path(graph, previous_max_flow, source, sink, flow_value, global_max = 0):
+                    def search_path(graph, source, sink, best_path, best_path_value):
                         ''' trace dominate flow: dfs '''
                         path_candidate = []
                         for i in range(num_kernels*num_workers+2):
-                            if graph[source][i]>0 and flow_value>previous_max_flow[i] and flow_value>global_max:
-                                previous_max_flow[i] = flow_value
-                                current_flow_value = min(flow_value, graph[source][i])
+                            if graph[source][i]>0:
                                 if i==sink:
-                                    path_candidate.append([[], current_flow_value])
-                                else:
-                                    res = search_path(graph, previous_max_flow, i, sink, current_flow_value, global_max)
-                                    if res is None:
-                                        continue
-                                    res[0].append(i)
-                                    if len(path_candidate)==0 or res[1]>path_candidate[0][1]:
-                                        path_candidate = [[res[0], res[1]]]
-                                        global_max = res[1]
-                                    # path_candidate.append([res[0], res[1]])
-                                    previous_max_flow = res[2]
-                        
-                        if len(path_candidate)!=0:
-                            path_candidate = sorted(path_candidate, key=lambda x: x[1])
-                            return path_candidate[-1][0], path_candidate[-1][1], previous_max_flow
+                                    path_candidate.append([[], graph[source][i]])
+                                    continue
+
+                                if best_path_value[i]==-1:
+                                    best_path, best_path_value = search_path(graph, i, sink, best_path, best_path_value)
+
+                                if best_path_value[i]>0:
+                                    path_candidate.append([[node for node in best_path[i]], best_path_value[i]+graph[source][i]])
+                                
+                                
+                                # if len(path_candidate)==0 or res[1]>path_candidate[0][1]:
+                                #     path_candidate = [[res[0], res[1]]]
+
+                        # print(path_candidate)
+                        if len(path_candidate)==0:
+                            best_path[source] = [source]
+                            best_path_value[source] = 0
                         else:
-                            return None
+                            path_candidate = sorted(path_candidate, key=lambda x: x[1])
+                            path_candidate[-1][0].append(source)
+                            best_path[source] = path_candidate[-1][0]
+                            best_path_value[source] = path_candidate[-1][1]
+                        return best_path, best_path_value
 
-                    capacity_graph = csr_matrix(capacity_matrix)
-                    flow = maximum_flow(capacity_graph, source, sink)
-                    residual_graph = flow.residual.toarray()
-                    value = flow.flow_value
-                    logger.info("round: {}, layer: {}, flow_value: {}".format(cr, layer_idx, value))
 
-                    while value>0:
-                        t1 = time.time()
-                        previous_max_flow = defaultdict(lambda: -1)
-                        path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
-                        path = path[::-1]
-                        for wid, kid in enumerate(path):
-                            all_kernel_order[wid].append(kid%num_kernels)
-                            capacity_matrix[kid] = [0 for i in range(num_workers*num_kernels+2)]
-                        
-                        t2 = time.time()
+                    
+
+                    while True:
                         capacity_graph = csr_matrix(capacity_matrix)
                         flow = maximum_flow(capacity_graph, source, sink)
                         residual_graph = flow.residual.toarray()
                         value = flow.flow_value
-                        t3 = time.time()
-                        logger.info("match: {}, dominate_flow: {}, time: {:.3f}, {:.3f}".format(path, dominate_flow, t2-t1, t3-t2))
+                        logger.info("round: {}, layer: {}, flow_value: {}".format(cr, layer_idx, value))
+                        if value==0:
+                            break
+
+                        while True:
+                            t1 = time.time()
+                            best_path = defaultdict(list)
+                            best_path_value = defaultdict(lambda: -1)
+                            best_path, best_path_value = search_path(residual_graph, source, sink, best_path, best_path_value)
+                            if best_path_value[source]<=0:
+                                break
+                            path = best_path[source][:len(best_path[source])-1][::-1]
+                            t2 = time.time()
+                            logger.info("match: {}, dominate_flow: {}, time: {:.3f}".format(path, best_path_value[source], t2-t1))
+                            for wid, kid in enumerate(path):
+                                all_kernel_order[wid].append(kid%num_kernels)
+                                capacity_matrix[kid] = [0 for i in range(num_workers*num_kernels+2)]
+                                residual_graph[kid] = 0
+                            
+                            
+                        
 
                     # previous_max_flow = defaultdict(lambda: -1)
                     # path, dominate_flow, previous_max_flow = search_path(residual_graph, previous_max_flow, source, sink, 999)
@@ -702,7 +716,7 @@ def fed_comm(batch_weights, model_meta_data, layer_type, net_dataidx_map,
                 averaged_weights.append(avegerated_weight)
                 # print("{:.3f}, {:.3f}, {:.3f}, {:.3f}".format(t1-t0, t2-t1, t3-t2, t4-t3))
 
-        elif args.comm_type=='fedmfv3': # maximum flow
+        elif args.comm_type=='fedmfv3': # maximum flow bottleneck
             batch_weights = pdm_prepare_full_weights_cnn(retrained_nets, device=device)
             total_data_points = sum([len(net_dataidx_map[r]) for r in range(args.n_nets)])
             fed_avg_freqs = [len(net_dataidx_map[r]) / total_data_points for r in range(args.n_nets)]
